@@ -30,26 +30,22 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-22.04
             artifact: mpmpes-linux-x86_64
-            cmake_args: ""
             cross: none
 
           - name: linux-x86_64-static
             os: ubuntu-22.04
             artifact: mpmpes-linux-x86_64-static
-            cmake_args: "-DCMAKE_EXE_LINKER_FLAGS=-static"
-            cross: static-try
+            cross: static
 
           - name: linux-aarch64
             os: ubuntu-22.04-arm
             artifact: mpmpes-linux-aarch64
-            cmake_args: ""
             cross: none
 
-          # --- Linux cross (compiler only + vendored zlib; no multiarch apt) ---
+          # --- Linux cross (compiler + vendored zlib; no multiarch apt) ---
           - name: linux-armv7
             os: ubuntu-22.04
             artifact: mpmpes-linux-armv7
-            cmake_args: ""
             cross: armv7
             cc: arm-linux-gnueabihf-gcc
             cxx: arm-linux-gnueabihf-g++
@@ -57,11 +53,11 @@ jobs:
             host: arm-linux-gnueabihf
             packages: g++-arm-linux-gnueabihf gcc-arm-linux-gnueabihf
             system_processor: arm
+            ldflags: ""
 
           - name: linux-s390x
             os: ubuntu-22.04
             artifact: mpmpes-linux-s390x
-            cmake_args: ""
             cross: s390x
             cc: s390x-linux-gnu-gcc
             cxx: s390x-linux-gnu-g++
@@ -69,11 +65,11 @@ jobs:
             host: s390x-linux-gnu
             packages: g++-s390x-linux-gnu gcc-s390x-linux-gnu
             system_processor: s390x
+            ldflags: ""
 
           - name: linux-ppc64le
             os: ubuntu-22.04
             artifact: mpmpes-linux-ppc64le
-            cmake_args: ""
             cross: ppc64le
             cc: powerpc64le-linux-gnu-gcc
             cxx: powerpc64le-linux-gnu-g++
@@ -81,11 +77,11 @@ jobs:
             host: powerpc64le-linux-gnu
             packages: g++-powerpc64le-linux-gnu gcc-powerpc64le-linux-gnu
             system_processor: ppc64le
+            ldflags: ""
 
           - name: linux-riscv64
             os: ubuntu-22.04
             artifact: mpmpes-linux-riscv64
-            cmake_args: ""
             cross: riscv64
             cc: riscv64-linux-gnu-gcc
             cxx: riscv64-linux-gnu-g++
@@ -93,133 +89,113 @@ jobs:
             host: riscv64-linux-gnu
             packages: g++-riscv64-linux-gnu gcc-riscv64-linux-gnu
             system_processor: riscv64
+            # 1-byte atomics need libatomic on riscv
+            ldflags: "-latomic"
 
-          # --- Windows ---
-          - name: windows-x86_64
-            os: windows-2022
-            artifact: mpmpes-windows-x86_64
-            cmake_args: ""
-            cross: none
+          # Windows (MSVC) needs Winsock/dlfcn port — not yet supported.
+          # Use WSL / Linux binary on Windows for now.
 
           # --- macOS ---
           - name: macos-x86_64
             os: macos-13
             artifact: mpmpes-macos-x86_64
-            cmake_args: ""
             cross: none
 
           - name: macos-arm64
             os: macos-14
             artifact: mpmpes-macos-arm64
-            cmake_args: ""
             cross: none
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install deps (Ubuntu native)
-        if: runner.os == 'Linux' && (matrix.cross == 'none' || matrix.cross == 'static-try')
+      - name: Install deps (Ubuntu native dynamic)
+        if: runner.os == 'Linux' && matrix.cross == 'none'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config zlib1g-dev zlib1g-dev \
-            file
-          # static link needs static libz
-          if [ "${{ matrix.cross }}" = "static-try" ]; then
-            sudo apt-get install -y --no-install-recommends zlib1g-dev
-          fi
+            build-essential cmake ninja-build pkg-config zlib1g-dev file
+
+      - name: Build static zlib + static link flags
+        if: runner.os == 'Linux' && matrix.cross == 'static'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config file
+          PREFIX="${GITHUB_WORKSPACE}/.deps/x86_64-static"
+          mkdir -p "$PREFIX" third_party
+          curl -fsSL "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" \
+            -o third_party/zlib.tar.gz
+          tar -xzf third_party/zlib.tar.gz -C third_party
+          (
+            cd "third_party/zlib-${ZLIB_VERSION}"
+            ./configure --static --prefix="$PREFIX"
+            make -j"$(nproc)"
+            make install
+          )
+          {
+            echo "CMAKE_EXTRA=-DZLIB_ROOT=${PREFIX} -DZLIB_INCLUDE_DIR=${PREFIX}/include -DZLIB_LIBRARY=${PREFIX}/lib/libz.a -DCMAKE_EXE_LINKER_FLAGS=-static"
+          } >> "$GITHUB_ENV"
 
       - name: Install cross compiler + build target zlib
-        if: runner.os == 'Linux' && matrix.cross != 'none' && matrix.cross != 'static-try'
+        if: runner.os == 'Linux' && matrix.cross != 'none' && matrix.cross != 'static'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config file \
             ${{ matrix.packages }}
-          # Build zlib for target (avoid multiarch apt / ports.ubuntu.com mess)
           PREFIX="${GITHUB_WORKSPACE}/.deps/${{ matrix.cross }}"
           mkdir -p "$PREFIX" third_party
           curl -fsSL "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" \
             -o third_party/zlib.tar.gz
           tar -xzf third_party/zlib.tar.gz -C third_party
-          cd "third_party/zlib-${ZLIB_VERSION}"
-          CHOST="${{ matrix.host }}" CC="${{ matrix.cc }}" AR="${{ matrix.host }}-ar" RANLIB="${{ matrix.host }}-ranlib" \
-            ./configure --static --prefix="$PREFIX"
-          make -j"$(nproc)"
-          make install
-          echo "ZLIB_ROOT=${PREFIX}" >> "$GITHUB_ENV"
-          echo "CMAKE_EXTRA=-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.system_processor }} -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DZLIB_ROOT=${PREFIX} -DZLIB_INCLUDE_DIR=${PREFIX}/include -DZLIB_LIBRARY=${PREFIX}/lib/libz.a" >> "$GITHUB_ENV"
+          (
+            cd "third_party/zlib-${ZLIB_VERSION}"
+            CHOST="${{ matrix.host }}" CC="${{ matrix.cc }}" \
+              AR="${{ matrix.host }}-ar" RANLIB="${{ matrix.host }}-ranlib" \
+              ./configure --static --prefix="$PREFIX"
+            make -j"$(nproc)"
+            make install
+          )
+          LDFLAGS="${{ matrix.ldflags }}"
+          CMAKE_EXTRA="-DCMAKE_SYSTEM_NAME=Linux"
+          CMAKE_EXTRA+=" -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.system_processor }}"
+          CMAKE_EXTRA+=" -DCMAKE_C_COMPILER=${{ matrix.cc }}"
+          CMAKE_EXTRA+=" -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}"
+          CMAKE_EXTRA+=" -DZLIB_ROOT=${PREFIX}"
+          CMAKE_EXTRA+=" -DZLIB_INCLUDE_DIR=${PREFIX}/include"
+          CMAKE_EXTRA+=" -DZLIB_LIBRARY=${PREFIX}/lib/libz.a"
+          if [ -n "${LDFLAGS}" ]; then
+            CMAKE_EXTRA+=" -DCMAKE_EXE_LINKER_FLAGS=${LDFLAGS}"
+          fi
+          echo "CMAKE_EXTRA=${CMAKE_EXTRA}" >> "$GITHUB_ENV"
           echo "STRIP_BIN=${{ matrix.strip }}" >> "$GITHUB_ENV"
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew install cmake ninja || true
+        run: brew install cmake ninja || true
 
-      - name: Build zlib (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ver = $env:ZLIB_VERSION
-          $prefix = Join-Path $env:GITHUB_WORKSPACE ".deps\zlib-win"
-          New-Item -ItemType Directory -Force -Path third_party | Out-Null
-          $url = "https://github.com/madler/zlib/releases/download/v$ver/zlib-$ver.tar.gz"
-          Invoke-WebRequest -Uri $url -OutFile third_party\zlib.tar.gz
-          tar -xzf third_party\zlib.tar.gz -C third_party
-          cmake -S "third_party/zlib-$ver" -B third_party/zlib-build `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_INSTALL_PREFIX="$prefix" `
-            -DZLIB_BUILD_EXAMPLES=OFF
-          cmake --build third_party/zlib-build --config Release --target install -j $env:NUMBER_OF_PROCESSORS
-          # MSVC install layout: lib/zlib.lib or zlibstatic.lib
-          Get-ChildItem -Recurse $prefix | Select-Object FullName
-          "ZLIB_ROOT=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Configure (Unix)
-        if: runner.os != 'Windows'
+      - name: Configure
         shell: bash
         run: |
           set -euo pipefail
-          EXTRA="${CMAKE_EXTRA:-} ${{ matrix.cmake_args }}"
-          # shell word-splitting intentional for cmake args
           # shellcheck disable=SC2086
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
             -DMPMPES_BUILD_EXAMPLE_NATIVE=OFF \
-            ${EXTRA}
+            ${CMAKE_EXTRA:-}
 
-      - name: Build (Unix)
-        if: runner.os != 'Windows'
+      - name: Build
         shell: bash
         run: |
           set -euo pipefail
           cmake --build build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           file build/mpmpes || true
           ls -la build/mpmpes
-
-      - name: Configure & Build (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $z = $env:ZLIB_ROOT
-          $lib = @(
-            Join-Path $z "lib\zlibstatic.lib"
-            Join-Path $z "lib\zlib.lib"
-            Join-Path $z "lib\z.lib"
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $lib) { throw "zlib library not found under $z" }
-          $inc = Join-Path $z "include"
-          cmake -S . -B build `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DMPMPES_BUILD_EXAMPLE_NATIVE=OFF `
-            -DZLIB_ROOT="$z" `
-            -DZLIB_INCLUDE_DIR="$inc" `
-            -DZLIB_LIBRARY="$lib"
-          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
-          Get-ChildItem -Recurse build -Filter mpmpes.exe | Select-Object FullName,Length
 
       - name: Package artifact
         shell: bash
@@ -234,28 +210,14 @@ jobs:
               shasum -a 256 "$@"
             fi
           }
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN=$(find build -name 'mpmpes.exe' | head -n1)
-            cp "$BIN" "dist/${ART}.exe"
-            (
-              cd dist
-              if command -v 7z >/dev/null 2>&1; then
-                7z a -tzip "${ART}.zip" "${ART}.exe" >/dev/null
-              else
-                powershell -NoProfile -Command "Compress-Archive -Path '${ART}.exe' -DestinationPath '${ART}.zip' -Force"
-              fi
-              hash_files "${ART}.exe" "${ART}.zip" > "${ART}.sha256"
-            )
-          else
-            cp build/mpmpes "dist/${ART}"
-            chmod +x "dist/${ART}"
-            STRIP_BIN="${STRIP_BIN:-strip}"
-            if command -v "$STRIP_BIN" >/dev/null 2>&1; then
-              "$STRIP_BIN" "dist/${ART}" || true
-            fi
-            tar -C dist -czf "dist/${ART}.tar.gz" "${ART}"
-            (cd dist && hash_files "${ART}" "${ART}.tar.gz" > "${ART}.sha256")
+          cp build/mpmpes "dist/${ART}"
+          chmod +x "dist/${ART}"
+          STRIP_BIN="${STRIP_BIN:-strip}"
+          if command -v "$STRIP_BIN" >/dev/null 2>&1; then
+            "$STRIP_BIN" "dist/${ART}" || true
           fi
+          tar -C dist -czf "dist/${ART}.tar.gz" "${ART}"
+          (cd dist && hash_files "${ART}" "${ART}.tar.gz" > "${ART}.sha256")
           ls -la dist/
 
       - name: Upload build artifact
@@ -270,7 +232,7 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-22.04
-    # Publish even if some matrix cells failed (partial multi-arch release)
+    # Publish even if some matrix cells failed
     if: always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != ''))
     steps:
       - name: Checkout
@@ -280,7 +242,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: false
 
       - name: Flatten packages
         shell: bash
@@ -288,7 +249,7 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
           if [ ! -d artifacts ]; then
-            echo "No artifacts directory — all builds failed?"
+            echo "No artifacts — all builds failed?"
             exit 1
           fi
           find artifacts -type f -print
@@ -325,27 +286,29 @@ jobs:
 
             Minecraft: PE **0.14.x** (protocol 70) C++ server core.
 
-            Multi-arch binaries built by GitHub Actions. See assets below / `SHA256SUMS.txt`.
+            Multi-arch binaries from GitHub Actions. Checksums in `SHA256SUMS.txt`.
 
-            ### Common assets
             | Asset | Platform |
             |-------|----------|
-            | `mpmpes-linux-x86_64.tar.gz` | Linux x86_64 |
-            | `mpmpes-linux-x86_64-static.tar.gz` | Linux x86_64 static (if linked) |
+            | `mpmpes-linux-x86_64.tar.gz` | Linux x86_64 (glibc) |
+            | `mpmpes-linux-x86_64-static.tar.gz` | Linux x86_64 fully static |
             | `mpmpes-linux-aarch64.tar.gz` | Linux ARM64 |
-            | `mpmpes-linux-armv7.tar.gz` | Linux ARMv7 hf |
+            | `mpmpes-linux-armv7.tar.gz` | Linux ARMv7 hard-float |
             | `mpmpes-linux-s390x.tar.gz` | Linux IBM Z (s390x) |
-            | `mpmpes-linux-ppc64le.tar.gz` | Linux POWER LE |
+            | `mpmpes-linux-ppc64le.tar.gz` | Linux POWER little-endian |
             | `mpmpes-linux-riscv64.tar.gz` | Linux RISC-V 64 |
-            | `mpmpes-windows-x86_64.zip` | Windows x64 |
             | `mpmpes-macos-x86_64.tar.gz` | macOS Intel |
             | `mpmpes-macos-arm64.tar.gz` | macOS Apple Silicon |
+
+            > **Windows:** not built yet (POSIX sockets / dlfcn). Use WSL or a Linux binary.
 
             ```bash
             tar -xzf mpmpes-linux-x86_64.tar.gz
             chmod +x mpmpes-linux-x86_64
             ./mpmpes-linux-x86_64 --port 19132
             ```
+
+            First run creates `server.properties` if missing.
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

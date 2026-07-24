@@ -43,14 +43,16 @@ cmake --build build -j"$(nproc)"
 
 | 产物 | 架构 |
 |------|------|
-| `mpmpes-linux-x86_64` | Linux x86_64 |
+| `mpmpes-linux-x86_64` | Linux x86_64 (glibc) |
+| `mpmpes-linux-x86_64-static` | Linux x86_64 全静态 |
 | `mpmpes-linux-aarch64` | Linux ARM64 |
-| `mpmpes-linux-armv7` | Linux ARMv7 |
-| `mpmpes-linux-s390x` | Linux IBM Z |
-| `mpmpes-linux-ppc64le` | Linux POWER |
+| `mpmpes-linux-armv7` | Linux ARMv7 hard-float |
+| `mpmpes-linux-s390x` | Linux IBM Z (s390x) |
+| `mpmpes-linux-ppc64le` | Linux POWER LE |
 | `mpmpes-linux-riscv64` | Linux RISC-V 64 |
-| `mpmpes-windows-x86_64` | Windows x64 |
 | `mpmpes-macos-x86_64` / `arm64` | macOS Intel / Apple Silicon |
+
+> Windows 暂未出包（源码仍为 POSIX socket/`dlfcn`）；请用 WSL 或 Linux 二进制。
 
 ```bash
 # 示例：本机发版
