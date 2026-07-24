@@ -95,11 +95,11 @@ jobs:
           # Windows (MSVC) needs Winsock/dlfcn port — not yet supported.
           # Use WSL / Linux binary on Windows for now.
 
-          # --- macOS ---
+          # --- macOS (both on macos-14; x86_64 via arch slice to avoid macos-13 queue) ---
           - name: macos-x86_64
-            os: macos-13
+            os: macos-14
             artifact: mpmpes-macos-x86_64
-            cross: none
+            cross: macos-x86_64
 
           - name: macos-arm64
             os: macos-14
@@ -178,6 +178,13 @@ jobs:
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
         run: brew install cmake ninja || true
+
+      # Build x86_64 slice on Apple Silicon runner (macos-13 queue is often stuck)
+      - name: Setup macOS x86_64 cross flags
+        if: runner.os == 'macOS' && matrix.cross == 'macos-x86_64'
+        run: |
+          set -euo pipefail
+          echo 'CMAKE_EXTRA=-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_SYSTEM_PROCESSOR=x86_64' >> "$GITHUB_ENV"
 
       - name: Configure
         shell: bash
