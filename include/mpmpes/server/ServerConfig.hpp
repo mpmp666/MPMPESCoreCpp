@@ -13,11 +13,14 @@ struct ServerConfig {
   std::string version_name = "0.14.3";
   int protocol = 70;
   std::string level_name = "world";
-  std::string level_type = "flat";
-  int gamemode = 0;
+  std::string level_type = "normal";
+  int gamemode = 0; // default survival for NEW players
   std::string plugins_dir = "plugins";
   bool enable_plugins = true;
   std::string data_path = "."; // working directory for properties/plugins
+
+  // Player vs player combat (left-click attack). off = no player damage from players.
+  bool pvp = true;
 
   // Outbound Batch (PM network.compression-level / batch-threshold)
   // threshold in KB: packet payload >= this size is zlib-wrapped as Batch 0x92.

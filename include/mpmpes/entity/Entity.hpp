@@ -91,6 +91,10 @@ struct Entity {
   item::ItemStack item_stack;
   int pickup_delay = 0; // ticks before players can pick up
   int lifetime = 6000;  // ~5 min at 20 tps
+
+  // Sheep: wool color 0-15; sheared → no wool drop / client DATA_COLOR_INFO bit4
+  std::uint8_t sheep_color = 0;
+  bool sheared = false;
 };
 
 class EntityManager {
@@ -113,6 +117,13 @@ public:
     // Face a sane default; motion uses PHP direction vector signs
     e.yaw = 0;
     e.target_yaw = 0;
+    if (kind == EntityKind::Sheep) {
+      // mostly white (PM-ish weights simplified)
+      static const std::uint8_t palette[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                            7, 8, 15, 12, 14, 1};
+      e.sheep_color = palette[static_cast<std::size_t>(e.eid) % (sizeof(palette) / sizeof(palette[0]))];
+      e.sheared = false;
+    }
     entities_[e.eid] = e;
     return entities_[e.eid];
   }

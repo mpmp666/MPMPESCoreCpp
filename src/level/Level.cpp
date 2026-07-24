@@ -1,12 +1,17 @@
 #include "mpmpes/level/Level.hpp"
 
+#include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/util/Logger.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <queue>
 #include <sstream>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -453,6 +458,360 @@ int Level::highestBlockY(int x, int z) {
   return -1;
 }
 
+namespace {
+
+// Non-solid / unsafe surface tops for spawn (fluids, leaves, plants, fire, portal...)
+bool isNonSolidBlock(std::uint8_t id) {
+  if (id == 0) return true;
+  // fluids (flowing + still)
+  if (id == protocol::BLOCK_WATER || id == 9) return true;
+  if (id == protocol::BLOCK_LAVA || id == 11) return true;
+  if (id == protocol::BLOCK_LEAVES) return true;
+  // tall grass / flowers / sapling / fire / snow layer / portal-ish / vines
+  if (id == 6 || id == 31 || id == 37 || id == 38 || id == 39 || id == 40) return true;
+  if (id == 51 || id == 78 || id == 90 || id == 106 || id == 111 || id == 175) return true;
+  return false;
+}
+
+bool isFluidBlock(std::uint8_t id) {
+  return id == protocol::BLOCK_WATER || id == 9 || id == protocol::BLOCK_LAVA || id == 11;
+}
+
+// True open air cell (not fluid / not "non-solid plant" clutter for clearance).
+bool isClearAir(std::uint8_t id) {
+  return id == 0 || id == protocol::BLOCK_LEAVES || id == 6 || id == 31 || id == 37 || id == 38 ||
+         id == 39 || id == 40 || id == 78 || id == 106 || id == 111 || id == 175;
+}
+
+// Surface Y (block under feet) suitable for player spawn, or -1.
+// Rules:
+// - only floors in [y_lo, y_hi]
+// - ignore void columns (no solid in band)
+// - require open_air continuous clear cells above the surface (not just 2 headroom)
+// - never stand on bedrock / under a ceiling ledge (top-down 2-air trap)
+int surfaceYForSpawn(Level& lvl, int x, int z, int y_lo, int y_hi, int open_air) {
+  if (open_air < 3) open_air = 3;
+  const int y_min = std::max(1, y_lo);
+  const int y_max = std::min({y_hi, kChunkHeight - 1 - open_air});
+  if (y_max < y_min) return -1;
+
+  // Scan top-down inside the band only (ignore void below y_lo and roof above y_hi).
+  for (int y = y_max; y >= y_min; --y) {
+    const auto id = lvl.getBlockId(x, y, z);
+    if (isNonSolidBlock(id) || isFluidBlock(id)) continue;
+    if (id == protocol::BLOCK_BEDROCK) continue;
+
+    // Feet/head + open sky: y+1 .. y+open_air must be clear (no solid ceiling ledge).
+    bool open = true;
+    for (int dy = 1; dy <= open_air; ++dy) {
+      const auto a = lvl.getBlockId(x, y + dy, z);
+      if (!isClearAir(a) || isFluidBlock(a)) {
+        open = false;
+        break;
+      }
+    }
+    if (!open) continue;
+
+    // Prefer real ground tops: block below should be solid/support, or y is band floor.
+    // (Skips single floating blobs under ceiling when possible.)
+    if (y > y_min) {
+      const auto below = lvl.getBlockId(x, y - 1, z);
+      if (isNonSolidBlock(below) || isFluidBlock(below)) {
+        // Allow thin end-island tops only if open_air is already large.
+        // Still accept: floating end platforms are legitimate.
+      }
+    }
+    return y;
+  }
+  return -1;
+}
+
+std::uint8_t platformBlockFor(GeneratorType gen) {
+  switch (gen) {
+    case GeneratorType::Nether:
+      return protocol::BLOCK_NETHERRACK;
+    case GeneratorType::End:
+      return protocol::BLOCK_END_STONE;
+    default:
+      return protocol::BLOCK_GRASS;
+  }
+}
+
+Vec3i carveSpawnPlatform(Level& lvl, GeneratorType gen, int feet_y_hint) {
+  const int px = 0;
+  const int pz = 0;
+  int py = feet_y_hint - 1;
+  if (gen == GeneratorType::Nether) py = 72;
+  else if (gen == GeneratorType::End) py = 64;
+  else if (gen == GeneratorType::Flat) py = 3;
+  else if (gen == GeneratorType::NormalStub) py = 68;
+  if (py < 1) py = 64;
+  if (py > kChunkHeight - 12) py = kChunkHeight - 12;
+  const auto floor_id = platformBlockFor(gen);
+  for (int dz = -2; dz <= 2; ++dz) {
+    for (int dx = -2; dx <= 2; ++dx) {
+      lvl.setBlock(px + dx, py, pz + dz, floor_id, 0);
+      // Clear a tall open column so nether ceiling cannot trap the player.
+      for (int dy = 1; dy <= 10; ++dy) {
+        lvl.setBlock(px + dx, py + dy, pz + dz, 0, 0);
+      }
+    }
+  }
+  return {px, py + 1, pz};
+}
+
+} // namespace
+
+int Level::safeStandFeetY(int x, int z) {
+  int y_lo = 2;
+  int y_hi = 100;
+  int open_air = 8;
+  switch (settings_.generator) {
+    case GeneratorType::Flat:
+      y_lo = 1;
+      y_hi = 20;
+      open_air = 4;
+      break;
+    case GeneratorType::Nether:
+      y_lo = 34; // above lava sea
+      y_hi = 90; // well below bedrock / hanging ceiling
+      open_air = 12;
+      break;
+    case GeneratorType::End:
+      y_lo = 40; // ignore void layer under floating islands
+      y_hi = 90;
+      open_air = 10;
+      break;
+    case GeneratorType::Void:
+      y_lo = 1;
+      y_hi = kChunkHeight - 3;
+      open_air = 4;
+      break;
+    default: // normal hills
+      y_lo = 40;
+      y_hi = 110;
+      open_air = 8;
+      break;
+  }
+  const int sy = surfaceYForSpawn(*this, x, z, y_lo, y_hi, open_air);
+  if (sy < 1) return -1;
+  return sy + 1; // feet on top of surface block
+}
+
+Vec3i Level::findAndSetAutoSpawn(int chunk_radius, int max_dist) {
+  // Default spawn remains whatever constructor set, until we find something better.
+  Vec3i best = settings_.spawn;
+  if (chunk_radius < 0) chunk_radius = 0;
+  if (max_dist < 1) max_dist = 1;
+
+  // Comfortable surface-Y band (avoids nether ceiling / void roof).
+  // open_air: continuous clear blocks above surface so the plane is "open sky", not under ceiling.
+  int y_lo = 2;
+  int y_hi = 100;
+  int open_air = 8;
+  switch (settings_.generator) {
+    case GeneratorType::Flat:
+      y_lo = 1;
+      y_hi = 20;
+      open_air = 4;
+      break;
+    case GeneratorType::Nether:
+      y_lo = 34; // above lava sea; ignore void/lava shell below
+      y_hi = 90; // never accept ceiling underside (~103-127)
+      open_air = 12;
+      break;
+    case GeneratorType::End:
+      y_lo = 40; // ignore void under floating islands
+      y_hi = 90;
+      open_air = 10;
+      break;
+    case GeneratorType::Void:
+      y_lo = 1;
+      y_hi = kChunkHeight - 3;
+      open_air = 4;
+      break;
+    default: // normal
+      y_lo = 40;
+      y_hi = 110;
+      open_air = 8;
+      break;
+  }
+
+  // Symmetric scan around (0,0):
+  // - load (2*r+1)^2 chunks (default 3x3)
+  // - only columns with |x|,|z| <= lim and x^2+z^2 <= max_dist^2
+  // lim keeps the box centered so superflat centroid lands on origin.
+  const int chunk_extent = chunk_radius * 16 + 15; // e.g. r=1 → 31
+  const int lim = std::min(max_dist, chunk_extent);
+  const int min_x = -lim;
+  const int max_x = lim;
+  const int min_z = -lim;
+  const int max_z = lim;
+  const int w = max_x - min_x + 1;
+  const int h = max_z - min_z + 1;
+  if (w <= 0 || h <= 0) return best;
+
+  // Preload chunks covering the symmetric AABB (may be slightly >3x3 when lim=31: cx -2..1).
+  const int min_cx = min_x >> 4;
+  const int max_cx = max_x >> 4;
+  const int min_cz = min_z >> 4;
+  const int max_cz = max_z >> 4;
+  for (int cz = min_cz; cz <= max_cz; ++cz) {
+    for (int cx = min_cx; cx <= max_cx; ++cx) {
+      (void)getOrCreateChunk(cx, cz);
+    }
+  }
+
+  std::vector<int> surf(static_cast<std::size_t>(w * h), -1);
+  auto idx = [w](int lx, int lz) { return lz * w + lx; };
+  const int max_dist2 = max_dist * max_dist;
+
+  int standable = 0;
+  for (int z = min_z; z <= max_z; ++z) {
+    for (int x = min_x; x <= max_x; ++x) {
+      if (x * x + z * z > max_dist2) continue;
+      const int sy = surfaceYForSpawn(*this, x, z, y_lo, y_hi, open_air);
+      if (sy < 1) continue;
+      surf[static_cast<std::size_t>(idx(x - min_x, z - min_z))] = sy;
+      ++standable;
+    }
+  }
+
+  // 4-connected flood fill: same surface Y = same flat plane.
+  std::vector<std::uint8_t> seen(static_cast<std::size_t>(w * h), 0);
+  int best_area = 0;
+  long long best_center_dist2 = 0x7fffffffffffffffLL;
+  int best_cx = best.x;
+  int best_cz = best.z;
+  int best_sy = best.y > 0 ? best.y - 1 : 4;
+
+  for (int lz = 0; lz < h; ++lz) {
+    for (int lx = 0; lx < w; ++lx) {
+      const int i0 = idx(lx, lz);
+      if (seen[static_cast<std::size_t>(i0)]) continue;
+      const int y0 = surf[static_cast<std::size_t>(i0)];
+      if (y0 < 1) {
+        seen[static_cast<std::size_t>(i0)] = 1;
+        continue;
+      }
+
+      int area = 0;
+      long long sum_x = 0;
+      long long sum_z = 0;
+      int min_bx = lx, max_bx = lx, min_bz = lz, max_bz = lz;
+      bool has_origin = false;
+      std::queue<std::pair<int, int>> q;
+      q.push({lx, lz});
+      seen[static_cast<std::size_t>(i0)] = 1;
+
+      while (!q.empty()) {
+        const auto [cx, cz] = q.front();
+        q.pop();
+        const int ii = idx(cx, cz);
+        if (surf[static_cast<std::size_t>(ii)] != y0) continue;
+        ++area;
+        const int wx = min_x + cx;
+        const int wz = min_z + cz;
+        sum_x += wx;
+        sum_z += wz;
+        if (wx == 0 && wz == 0) has_origin = true;
+        if (cx < min_bx) min_bx = cx;
+        if (cx > max_bx) max_bx = cx;
+        if (cz < min_bz) min_bz = cz;
+        if (cz > max_bz) max_bz = cz;
+
+        static const int ox[4] = {1, -1, 0, 0};
+        static const int oz[4] = {0, 0, 1, -1};
+        for (int d = 0; d < 4; ++d) {
+          const int nx = cx + ox[d];
+          const int nz = cz + oz[d];
+          if (nx < 0 || nz < 0 || nx >= w || nz >= h) continue;
+          const int ni = idx(nx, nz);
+          if (seen[static_cast<std::size_t>(ni)]) continue;
+          if (surf[static_cast<std::size_t>(ni)] != y0) continue;
+          seen[static_cast<std::size_t>(ni)] = 1;
+          q.push({nx, nz});
+        }
+      }
+
+      if (area <= 0) continue;
+
+      // Plane center = centroid of member columns; snap to a real plane cell.
+      // If (0,0) is on this plane, use origin (still "on the plane", best default).
+      int use_x = 0;
+      int use_z = 0;
+      if (has_origin) {
+        use_x = 0;
+        use_z = 0;
+      } else {
+        const int mid_x = static_cast<int>(sum_x / area);
+        const int mid_z = static_cast<int>(sum_z / area);
+        use_x = mid_x;
+        use_z = mid_z;
+        const int clx = mid_x - min_x;
+        const int clz = mid_z - min_z;
+        bool ok = clx >= 0 && clz >= 0 && clx < w && clz < h &&
+                  surf[static_cast<std::size_t>(idx(clx, clz))] == y0;
+        if (!ok) {
+          int nearest_d2 = 0x7fffffff;
+          ok = false;
+          for (int zz = min_bz; zz <= max_bz; ++zz) {
+            for (int xx = min_bx; xx <= max_bx; ++xx) {
+              if (surf[static_cast<std::size_t>(idx(xx, zz))] != y0) continue;
+              const int wx = min_x + xx;
+              const int wz = min_z + zz;
+              const int ddx = wx - mid_x;
+              const int ddz = wz - mid_z;
+              const int d2 = ddx * ddx + ddz * ddz;
+              if (d2 < nearest_d2) {
+                nearest_d2 = d2;
+                use_x = wx;
+                use_z = wz;
+                ok = true;
+              }
+            }
+          }
+        }
+        if (!ok) continue;
+      }
+
+      const long long center_dist2 =
+          static_cast<long long>(use_x) * use_x + static_cast<long long>(use_z) * use_z;
+      // Largest area wins; tie-break: spawn closer to (0,0).
+      if (area > best_area || (area == best_area && center_dist2 < best_center_dist2)) {
+        best_area = area;
+        best_center_dist2 = center_dist2;
+        best_cx = use_x;
+        best_cz = use_z;
+        best_sy = y0;
+      }
+    }
+  }
+
+  // Need a real platform (nether lava seas often have only 1-cell "planes").
+  constexpr int kMinPlaneArea = 9;
+  if (best_area >= kMinPlaneArea) {
+    best.x = best_cx;
+    best.y = best_sy + 1; // feet on top of surface block
+    best.z = best_cz;
+    settings_.spawn = best;
+    util::Logger::instance().info(
+        "Auto-spawn ", settings_.name, ": plane_area=", best_area, " at ", best.x, ",",
+        best.y, ",", best.z, " (symmetric lim=", lim, ", max_dist=", max_dist,
+        ", chunks ", (max_cx - min_cx + 1), "x", (max_cz - min_cz + 1), ")");
+    return best;
+  }
+
+  // Fallback: 5x5 safe platform at origin.
+  best = carveSpawnPlatform(*this, settings_.generator, settings_.spawn.y);
+  settings_.spawn = best;
+  util::Logger::instance().warning(
+      "Auto-spawn ", settings_.name, ": no usable plane (best_area=", best_area,
+      ", standable=", standable, "); built 5x5 platform at ", best.x, ",", best.y, ",",
+      best.z);
+  return best;
+}
+
 Level& LevelManager::create(LevelSettings settings) {
   auto name = settings.name;
   auto level = std::make_unique<Level>(std::move(settings));
@@ -463,6 +822,13 @@ Level& LevelManager::create(LevelSettings settings) {
   fs::create_directories(ptr->dataPath() + "/chunks", ec);
   ptr->loadChests();
   ptr->loadFurnaces();
+  // Auto spawn: largest flat plane in 3x3 chunks around 0,0 (columns within 100 of origin).
+  // Flat worlds still scan (fast); result ~0,5,0. Normal/nether/end get a real platform.
+  try {
+    ptr->findAndSetAutoSpawn(/*chunk_radius=*/1, /*max_dist=*/100);
+  } catch (...) {
+    util::Logger::instance().warning("Auto-spawn failed for ", name, "; using default spawn");
+  }
   levels_[name] = std::move(level);
   if (!default_) default_ = ptr;
   util::Logger::instance().info("World loaded: ", name, " generator=",

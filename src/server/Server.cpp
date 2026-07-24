@@ -59,12 +59,11 @@ void Server::breakBlock(player::Player& p, int x, int y, int z) {
   auto id = p.level->getBlockId(x, y, z);
   auto meta = p.level->getBlockMeta(x, y, z);
   if (id == 0) return;
-  if (id == protocol::BLOCK_BEDROCK && p.gamemode != 1) {
-    players_->sendPacket(p, protocol::encodeTextSystem("Cannot break bedrock"), false);
-    return;
+  // Bedrock: silent reject (do NOT TextSystem — client dig spam flooded chat).
+  // Creative may break bedrock except floor y=0.
+  if (id == protocol::BLOCK_BEDROCK) {
+    if (p.gamemode != 1 || y == 0) return;
   }
-  // creative can break bedrock for testing except y=0
-  if (id == protocol::BLOCK_BEDROCK && y == 0) return;
 
   if (!p.level->setBlock(x, y, z, 0, 0)) return;
 
@@ -134,6 +133,14 @@ void Server::breakBlock(player::Player& p, int x, int y, int z) {
     }
   }
 
+  // Survival tool durability: dig costs 1 (PM Tool::useOn type=1)
+  if (p.gamemode != 1) {
+    auto& held = p.heldItem();
+    if (item::isToolItem(held.id) && item::toolKind(held.id) != item::ToolKind::Bow) {
+      if (item::applyDurability(held, 1)) players_->sendInventory(p);
+    }
+  }
+
   plugin::BlockEvent bev;
   bev.username = p.username;
   bev.x = x;
@@ -168,9 +175,7 @@ void Server::placeBlock(player::Player& p, int x, int y, int z, std::uint8_t fac
       for (auto& [_, pl] : players_->all()) {
         if (pl.level == p.level && pl.spawned) spawnEntityToPlayer(pl, e);
       }
-      players_->sendPacket(p, protocol::encodeTextSystem(std::string("Spawned ") +
-                                                         entity::kindName(kind)),
-                           false);
+      // no chat on spawn-egg place (was noisy; client already sees the entity)
       if (p.gamemode != 1) {
         auto& h = p.heldItem();
         if (h.count > 1) --h.count;
@@ -361,9 +366,12 @@ void Server::changePlayerWorld(player::Player& p, level::Level* target, float x,
       p.level ? p.level->protocolDimension() : protocol::DIMENSION_OVERWORLD;
   const auto to_dim = target->protocolDimension(); // PE 0.14: only 0/1 (never 2)
 
+  // Despawn this player from others in old world before level switch
+  broadcastPlayerDespawn(p);
   p.level = target;
   p.sent_chunks.clear();
   p.known_entities.clear();
+  p.known_players.clear();
   p.x = x;
   p.y = y;
   p.z = z;
@@ -403,19 +411,29 @@ void Server::changePlayerWorld(player::Player& p, level::Level* target, float x,
   players_->sendInventory(p);
   if (p.gamemode == 1) players_->sendCreativeContents(p);
   syncEntitiesToPlayer(p);
+  syncPlayersToPlayer(p);
+  broadcastPlayerSpawn(p);
 }
 
-void Server::damagePlayer(player::Player& p, float amount, const char* cause) {
-  if (!players_ || !p.spawned || amount <= 0.f) return;
-  if (p.gamemode == 1) return; // creative invulnerable
-  if (p.death_ticks_ >= 0) return;
-  if (p.hurt_cooldown_ > 0) return;
+bool Server::damagePlayer(player::Player& p, float amount, const char* cause) {
+  if (!players_ || !p.spawned || amount <= 0.f) return false;
+  if (p.gamemode == 1) return false; // creative invulnerable
+  if (p.death_ticks_ >= 0) return false;
+  if (p.hurt_cooldown_ > 0) return false;
 
   p.health = std::max(0, p.health - static_cast<int>(std::ceil(amount)));
   p.hurt_cooldown_ = 10; // ~0.5s i-frames
   players_->sendPacket(p, protocol::encodeSetHealth(p.health), true);
-  // self eid is 0 on client
+  // self eid is 0 on client; other viewers need real runtime entity_id (PM Living::attack)
   players_->sendPacket(p, protocol::encodeEntityEvent(0, protocol::ENTITY_EVENT_HURT), true);
+  if (p.entity_id != 0) {
+    auto hurt_view = protocol::encodeEntityEvent(p.entity_id, protocol::ENTITY_EVENT_HURT);
+    for (auto& [_, other] : players_->all()) {
+      if (!other.spawned || &other == &p || other.level != p.level) continue;
+      if (!other.known_players.count(p.entity_id)) continue;
+      players_->sendPacket(other, hurt_view, false);
+    }
+  }
 
   if (p.health <= 0) {
     p.death_ticks_ = 0;
@@ -424,6 +442,14 @@ void Server::damagePlayer(player::Player& p, float amount, const char* cause) {
     p.fire_ticks_ = 0;
     players_->sendPacket(p, protocol::encodeSetHealth(0), true);
     players_->sendPacket(p, protocol::encodeEntityEvent(0, protocol::ENTITY_EVENT_DEATH), true);
+    if (p.entity_id != 0) {
+      auto death_view = protocol::encodeEntityEvent(p.entity_id, protocol::ENTITY_EVENT_DEATH);
+      for (auto& [_, other] : players_->all()) {
+        if (!other.spawned || &other == &p || other.level != p.level) continue;
+        if (!other.known_players.count(p.entity_id)) continue;
+        players_->sendPacket(other, death_view, false);
+      }
+    }
     // PE 0.14: RespawnPacket on death unlocks the client respawn button (PM Player::kill).
     // Without this the button stays grey and only a server auto-respawn would recover.
     if (p.level) {
@@ -442,6 +468,43 @@ void Server::damagePlayer(player::Player& p, float amount, const char* cause) {
                                   cause && cause[0] ? cause : "",
                                   cause && cause[0] ? ")" : "");
   }
+  return true;
+}
+
+void Server::knockbackPlayer(player::Player& victim, float from_x, float from_z, float base) {
+  if (!players_ || !victim.spawned || victim.gamemode == 1) return;
+  // PM Living::knockBack: direction away from attacker, base default 0.4
+  float x = victim.x - from_x;
+  float z = victim.z - from_z;
+  float f = std::sqrt(x * x + z * z);
+  if (f <= 0.001f) {
+    x = 0.f;
+    z = 1.f;
+    f = 1.f;
+  }
+  f = 1.f / f;
+  float mx = x * f * base;
+  float my = base;
+  float mz = z * f * base;
+  if (my > base) my = base;
+
+  // Self: PE expects eid=0 for local player motion (PM Player::setMotion)
+  players_->sendPacket(victim, protocol::encodeSetEntityMotion(0, mx, my, mz), true);
+  // Nearby viewers: real runtime entity_id so they see the body fly back
+  if (victim.entity_id != 0) {
+    auto view = protocol::encodeSetEntityMotion(victim.entity_id, mx, my, mz);
+    for (auto& [_, other] : players_->all()) {
+      if (!other.spawned || &other == &victim || other.level != victim.level) continue;
+      if (!other.known_players.count(victim.entity_id)) continue;
+      players_->sendPacket(other, view, false);
+    }
+  }
+  // Soft server-side nudge so next MovePlayer isn't rubber-band snapped instantly
+  victim.x += mx * 0.5f;
+  victim.y += my * 0.35f;
+  victim.z += mz * 0.5f;
+  victim.on_ground_ = false;
+  victim.fall_distance_ = 0.f; // don't count knockback as fall start
 }
 
 void Server::respawnPlayer(player::Player& p) {
@@ -464,6 +527,12 @@ void Server::respawnPlayer(player::Player& p) {
       p, protocol::encodeMovePlayer(0, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 1, true), true);
   players_->sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_PLAYER_SPAWN), true);
   players_->sendChunksAround(p);
+  // Death sent EntityEvent(DEATH) to viewers; client keeps a dead body for that eid.
+  // spawnPlayerToPlayer early-returns if eid is still in known_players, so without a
+  // RemovePlayer first the player stays invisible/corpse after respawn teleport.
+  broadcastPlayerDespawn(p);
+  broadcastPlayerSpawn(p);
+  syncPlayersToPlayer(p);
 }
 
 void Server::tickPlayerDamage() {
@@ -563,26 +632,34 @@ void Server::tickPlayerPortals() {
       dz = p.z / 8.f;
     }
 
-    // safe Y: find solid surface near target column
-    const int tx = static_cast<int>(std::floor(dx));
-    const int tz = static_cast<int>(std::floor(dz));
-    int hy = dest->highestBlockY(tx, tz);
-    if (hy < 1) hy = dest->spawn().y;
-    // avoid landing in lava (nether)
-    if (dest->protocolDimension() == protocol::DIMENSION_NETHER) {
-      hy = std::max(hy, 40);
-      // climb out of lava if needed
-      for (int y = hy; y < 120; ++y) {
-        const auto id = dest->getBlockId(tx, y, tz);
-        const auto above = dest->getBlockId(tx, y + 1, tz);
-        if (id != 0 && id != protocol::BLOCK_LAVA && id != protocol::BLOCK_PORTAL && above == 0) {
-          hy = y;
-          break;
+    // safe Y: open-air surface near target column (never nether ceiling underside)
+    int tx = static_cast<int>(std::floor(dx));
+    int tz = static_cast<int>(std::floor(dz));
+    int feet = dest->safeStandFeetY(tx, tz);
+    if (feet < 1) {
+      // spiral search a few blocks around, then fall back to world spawn
+      for (int r = 1; r <= 8 && feet < 1; ++r) {
+        for (int oz = -r; oz <= r && feet < 1; ++oz) {
+          for (int ox = -r; ox <= r && feet < 1; ++ox) {
+            if (std::abs(ox) != r && std::abs(oz) != r) continue;
+            const int fy = dest->safeStandFeetY(tx + ox, tz + oz);
+            if (fy >= 1) {
+              feet = fy;
+              tx = tx + ox;
+              tz = tz + oz;
+            }
+          }
         }
       }
     }
-    dy = static_cast<float>(hy + 1);
+    if (feet < 1) {
+      const auto sp = dest->spawn();
+      feet = sp.y;
+      tx = sp.x;
+      tz = sp.z;
+    }
     dx = static_cast<float>(tx) + 0.5f;
+    dy = static_cast<float>(feet);
     dz = static_cast<float>(tz) + 0.5f;
 
     changePlayerWorld(p, dest, dx, dy, dz, true);
@@ -603,8 +680,12 @@ void Server::spawnEntityToPlayer(player::Player& p, const entity::Entity& e) {
     players_->sendPacket(p, std::move(pk), true);
   } else {
     // pitch forced 0 so models stay upright; yaw matches walk direction vector
+    std::string meta;
+    if (e.kind == entity::EntityKind::Sheep) {
+      meta = protocol::encodeSheepMetadata(e.sheep_color, e.sheared);
+    }
     auto pk = protocol::encodeAddEntity(e.eid, entity::networkType(e.kind), e.x, e.y, e.z, e.yaw,
-                                        0.f /*pitch*/);
+                                        0.f /*pitch*/, 0.f, 0.f, 0.f, meta);
     players_->sendPacket(p, std::move(pk), false);
   }
   p.known_entities.insert(e.eid);
@@ -617,6 +698,91 @@ void Server::syncEntitiesToPlayer(player::Player& p) {
     const float dx = e.x - p.x, dy = e.y - p.y, dz = e.z - p.z;
     if (dx * dx + dy * dy + dz * dz > 48.f * 48.f) continue;
     spawnEntityToPlayer(p, e);
+  }
+}
+
+void Server::spawnPlayerToPlayer(player::Player& viewer, const player::Player& target) {
+  if (!players_ || !viewer.spawned || !target.spawned) return;
+  if (&viewer == &target) return;
+  if (!viewer.level || viewer.level != target.level) return;
+  if (target.entity_id == 0 || target.username.empty()) return;
+  // Don't (re)spawn a corpse as a living player while still dead
+  if (target.death_ticks_ >= 0 || target.health <= 0) return;
+  if (viewer.known_players.count(target.entity_id)) return;
+
+  auto pk = protocol::encodeAddPlayer(target.uuid, target.username, target.entity_id, target.x,
+                                      target.y, target.z, target.yaw, target.pitch, target.heldItem());
+  players_->sendPacket(viewer, std::move(pk), true);
+  viewer.known_players.insert(target.entity_id);
+}
+
+void Server::despawnPlayerFrom(player::Player& viewer, const player::Player& target) {
+  if (!players_) return;
+  if (!viewer.known_players.erase(target.entity_id)) return;
+  players_->sendPacket(viewer, protocol::encodeRemovePlayer(target.entity_id, target.uuid), true);
+}
+
+void Server::syncPlayersToPlayer(player::Player& p) {
+  if (!players_ || !p.level || !p.spawned) return;
+  constexpr float kRange = 64.f;
+  constexpr float kRange2 = kRange * kRange;
+
+  // Despawn players that left range / world / unspawned
+  std::vector<std::int64_t> drop;
+  for (auto eid : p.known_players) {
+    bool still = false;
+    for (auto& [_, other] : players_->all()) {
+      if (!other.spawned || other.entity_id != eid) continue;
+      if (other.level != p.level) break;
+      const float dx = other.x - p.x, dy = other.y - p.y, dz = other.z - p.z;
+      if (dx * dx + dy * dy + dz * dz <= kRange2) still = true;
+      break;
+    }
+    if (!still) drop.push_back(eid);
+  }
+  for (auto eid : drop) {
+    // find uuid for RemovePlayer if still in map; else RemoveEntity fallback
+    player::Player* found = nullptr;
+    for (auto& [_, other] : players_->all()) {
+      if (other.entity_id == eid) {
+        found = &other;
+        break;
+      }
+    }
+    p.known_players.erase(eid);
+    if (found) {
+      players_->sendPacket(p, protocol::encodeRemovePlayer(eid, found->uuid), true);
+    } else {
+      players_->sendPacket(p, protocol::encodeRemoveEntity(eid), true);
+    }
+  }
+
+  // Spawn nearby others
+  for (auto& [_, other] : players_->all()) {
+    if (!other.spawned || &other == &p || other.level != p.level) continue;
+    const float dx = other.x - p.x, dy = other.y - p.y, dz = other.z - p.z;
+    if (dx * dx + dy * dy + dz * dz > kRange2) continue;
+    spawnPlayerToPlayer(p, other);
+  }
+}
+
+void Server::broadcastPlayerSpawn(const player::Player& joined) {
+  if (!players_ || !joined.spawned) return;
+  for (auto& [_, pl] : players_->all()) {
+    if (!pl.spawned || &pl == &joined || pl.level != joined.level) continue;
+    const float dx = joined.x - pl.x, dy = joined.y - pl.y, dz = joined.z - pl.z;
+    if (dx * dx + dy * dy + dz * dz > 64.f * 64.f) continue;
+    spawnPlayerToPlayer(pl, joined);
+  }
+}
+
+void Server::broadcastPlayerDespawn(const player::Player& left) {
+  if (!players_) return;
+  for (auto& [_, pl] : players_->all()) {
+    if (&pl == &left) continue;
+    if (pl.known_players.erase(left.entity_id)) {
+      players_->sendPacket(pl, protocol::encodeRemovePlayer(left.entity_id, left.uuid), true);
+    }
   }
 }
 
@@ -904,6 +1070,18 @@ void Server::handleLogin(player::Player& p, std::string_view buffer) {
   if (p.has_saved_data && !p.saved_world_name.empty()) {
     if (auto* lvl = levels_.get(p.saved_world_name)) {
       p.level = lvl;
+    } else {
+      // Saved world gone (e.g. zc -> world rename): keep inv/mode, reset to default spawn.
+      p.level = levels_.defaultLevel();
+      if (p.level) {
+        const auto sp = p.level->spawn();
+        p.x = static_cast<float>(sp.x) + 0.5f;
+        p.y = static_cast<float>(sp.y);
+        p.z = static_cast<float>(sp.z) + 0.5f;
+      }
+      util::Logger::instance().notice(
+          p.username, " saved world '", p.saved_world_name,
+          "' missing; moved to default ", p.level ? p.level->name() : "?");
     }
   }
 
@@ -918,6 +1096,8 @@ void Server::handleLogin(player::Player& p, std::string_view buffer) {
 
   players_->doLoginSequence(p);
   syncEntitiesToPlayer(p);
+  syncPlayersToPlayer(p);
+  broadcastPlayerSpawn(p);
 
   plugin::PlayerJoinEvent jev;
   jev.username = p.username;
@@ -1062,7 +1242,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
   }
 
   if (cmd == "ver" || cmd == "version") {
-    reply(std::string("MPMPESCoreCpp 0.4.22 (death-respawn-btn) | MCPE ") + cfg_.version_name +
+    reply(std::string("MPMPESCoreCpp 0.4.23 (mp-visibility-pvp-spawn) | MCPE ") + cfg_.version_name +
           " protocol " + std::to_string(cfg_.protocol));
     return;
   }
@@ -1135,7 +1315,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     if (world == "end") world = "ender";
     auto* lvl = levels_.get(world);
     if (!lvl) {
-      reply("Unknown world: " + world + " (try: zc nether ender)");
+      reply("Unknown world: " + world + " (try: world nether ender)");
       return;
     }
     const auto spawn = lvl->spawn();
@@ -1147,31 +1327,86 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
   }
 
   if (cmd == "gm" || cmd == "gamemode") {
-    if (!player) {
-      reply("gamemode requires an in-game player");
+    // /gm [mode] [player]
+    //  - no args: toggle self (in-game only)
+    //  - /gm 1 or /gm creative: set self (in-game) / requires target on console
+    //  - /gm 1 Steve: set target (in-game or console)
+    std::string a = trim(std::string(args));
+    std::string mode_tok;
+    std::string target_tok;
+    if (!a.empty()) {
+      auto sp = a.find(' ');
+      if (sp == std::string::npos) {
+        mode_tok = a;
+      } else {
+        mode_tok = trim(a.substr(0, sp));
+        target_tok = trim(a.substr(sp + 1));
+      }
+    }
+
+    player::Player* target = player;
+    if (!target_tok.empty()) {
+      target = findPlayerByName(target_tok);
+      if (!target) {
+        reply("Player not online: " + target_tok);
+        return;
+      }
+    } else if (!player) {
+      reply("Usage: gm <0|1|survival|creative> <player>   (console needs a player name)");
       return;
     }
-    std::string a = trim(std::string(args));
-    int gm = player->gamemode;
-    if (!a.empty()) {
+
+    int gm = target->gamemode;
+    if (!mode_tok.empty()) {
+      std::string m = mode_tok;
+      for (auto& c : m)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
       try {
-        gm = std::stoi(a);
+        gm = std::stoi(m);
       } catch (...) {
-        if (a == "c" || a == "creative") gm = 1;
-        else if (a == "s" || a == "survival") gm = 0;
+        if (m == "c" || m == "creative" || m == "1") gm = 1;
+        else if (m == "s" || m == "survival" || m == "0") gm = 0;
+        else {
+          // bare name as only arg: treat as target + toggle (in-game)
+          if (target_tok.empty() && player) {
+            auto* named = findPlayerByName(mode_tok);
+            if (named) {
+              target = named;
+              gm = target->gamemode == 1 ? 0 : 1;
+            } else {
+              reply("Unknown gamemode: " + mode_tok + " (use 0/1/s/c or survival/creative)");
+              return;
+            }
+          } else {
+            reply("Unknown gamemode: " + mode_tok + " (use 0/1/s/c or survival/creative)");
+            return;
+          }
+        }
       }
     } else {
-      gm = player->gamemode == 1 ? 0 : 1;
+      gm = target->gamemode == 1 ? 0 : 1;
     }
-    player->gamemode = (gm == 1) ? 1 : 0;
-    players_->sendPacket(*player, protocol::encodeSetPlayerGameType(player->gamemode), true);
+    gm = (gm == 1) ? 1 : 0;
+    target->gamemode = gm;
+    players_->sendPacket(*target, protocol::encodeSetPlayerGameType(target->gamemode), true);
     std::int32_t flags = 0x40;
-    if (player->gamemode == 1) flags |= 0x80;
-    players_->sendPacket(*player, protocol::encodeAdventureSettings(flags), true);
-    player->inventory = item::starterInventory(player->gamemode == 1);
-    players_->sendInventory(*player);
-    if (player->gamemode == 1) players_->sendCreativeContents(*player);
-    reply(player->gamemode == 1 ? "Gamemode: CREATIVE" : "Gamemode: SURVIVAL");
+    if (target->gamemode == 1) flags |= 0x80;
+    players_->sendPacket(*target, protocol::encodeAdventureSettings(flags), true);
+    target->inventory = item::starterInventory(target->gamemode == 1);
+    players_->sendInventory(*target);
+    if (target->gamemode == 1) players_->sendCreativeContents(*target);
+    const char* mode_s = target->gamemode == 1 ? "CREATIVE" : "SURVIVAL";
+    if (player && target == player) {
+      reply(std::string("Gamemode: ") + mode_s);
+    } else {
+      reply(std::string("Set ") + target->username + " gamemode: " + mode_s);
+      if (player != target) {
+        players_->sendPacket(*target,
+                             protocol::encodeTextSystem(std::string("\xc2\xa7") + "eYour gamemode: " +
+                                                        mode_s),
+                             false);
+      }
+    }
     return;
   }
 
@@ -1607,9 +1842,21 @@ void Server::handleMove(player::Player& p, std::string_view buffer) {
   mev.pitch = p.pitch;
   plugins_.fireMove(mev);
 
+  // Relay movement to other clients that can see this player (PM broadcastMovement)
+  if (players_ && p.entity_id != 0) {
+    auto mp = protocol::encodeMovePlayer(p.entity_id, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 0,
+                                         p.on_ground_);
+    for (auto& [_, other] : players_->all()) {
+      if (!other.spawned || &other == &p || other.level != p.level) continue;
+      if (!other.known_players.count(p.entity_id)) continue;
+      players_->sendPacket(other, mp, false);
+    }
+  }
+
   if ((tick_counter_ % 10) == 0) {
     players_->sendChunksAround(p);
     syncEntitiesToPlayer(p);
+    syncPlayersToPlayer(p);
   }
 }
 
@@ -1625,17 +1872,9 @@ void Server::handlePlayerAction(player::Player& p, std::string_view buffer) {
   auto a = protocol::decodePlayerAction(buffer);
   if (!a.ok) return;
 
-  // Do NOT fire plugins on START/ABORT (high-freq; process plugins used to sleep 50ms each)
-  if (a.action == protocol::ACTION_STOP_BREAK || a.action == protocol::ACTION_DROP_ITEM) {
-    plugin::BlockEvent bev;
-    bev.username = p.username;
-    bev.x = a.x;
-    bev.y = a.y;
-    bev.z = a.z;
-    bev.action = a.action;
-    bev.face = a.face;
-    plugins_.fireBlock(bev);
-  }
+  // Block plugins fire once from breakBlock/placeBlock — do NOT also fire here on STOP
+  // (was double-firing Hello* logs / console spam on every dig).
+  // DROP_ITEM is not a world block place/break; skip plugin block event here.
 
   if (a.action == protocol::ACTION_START_BREAK) {
     p.breaking_x = a.x;
@@ -1871,23 +2110,26 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
 
     // Flint & steel: light nether portal on obsidian frame, else place fire
     if (held.id == item::ids::FLINT_STEEL) {
+      bool used = false;
       if (bid == protocol::BLOCK_OBSIDIAN) {
         if (tryLightNetherPortal(p, u.x, u.y, u.z)) {
-          if (p.gamemode != 1) {
-            auto& h = p.heldItem();
-            // durability not tracked; keep item for simplicity (creative unlimited)
-            (void)h;
-          }
+          used = true;
           players_->sendPacket(p, protocol::encodeTextSystem("Nether portal lit"), false);
-          return;
         }
       }
-      // place fire on face of solid block
-      std::int32_t fx = u.x, fy = u.y, fz = u.z;
-      protocol::faceOffset(u.face, fx, fy, fz);
-      if (fy >= 0 && fy < 128 && p.level->getBlockId(fx, fy, fz) == 0) {
-        p.level->setBlock(fx, fy, fz, protocol::BLOCK_FIRE, 0);
-        broadcastBlockUpdate(p.level, fx, fy, fz, protocol::BLOCK_FIRE, 0, nullptr);
+      if (!used) {
+        // place fire on face of solid block
+        std::int32_t fx = u.x, fy = u.y, fz = u.z;
+        protocol::faceOffset(u.face, fx, fy, fz);
+        if (fy >= 0 && fy < 128 && p.level->getBlockId(fx, fy, fz) == 0) {
+          p.level->setBlock(fx, fy, fz, protocol::BLOCK_FIRE, 0);
+          broadcastBlockUpdate(p.level, fx, fy, fz, protocol::BLOCK_FIRE, 0, nullptr);
+          used = true;
+        }
+      }
+      if (used && p.gamemode != 1) {
+        auto& h = p.heldItem();
+        if (item::applyDurability(h, 1)) players_->sendInventory(p);
       }
       return;
     }
@@ -2227,31 +2469,88 @@ void Server::handleCraftingEvent(player::Player& p, std::string_view buffer) {
                                 static_cast<int>(c.output[0].count));
 }
 
+void Server::handleAnimate(player::Player& p, std::string_view buffer) {
+  auto a = protocol::decodeAnimate(buffer);
+  if (!a.ok || !p.spawned || p.death_ticks_ >= 0) return;
+  if (p.entity_id == 0 || !players_) return;
+  // PM: rebroadcast Animate to viewers with this player's runtime eid (not client 0)
+  auto pk = protocol::encodeAnimate(a.action, p.entity_id);
+  for (auto& [_, other] : players_->all()) {
+    if (!other.spawned || &other == &p || other.level != p.level) continue;
+    if (!other.known_players.count(p.entity_id)) continue;
+    players_->sendPacket(other, pk, false);
+  }
+}
+
 void Server::handleInteract(player::Player& p, std::string_view buffer) {
   auto i = protocol::decodeInteract(buffer);
   if (!i.ok || !p.spawned || p.death_ticks_ >= 0) return;
-  // PM InteractPacket: 1=RIGHT_CLICK (mount/use), 2=LEFT_CLICK (attack)
-  // Only left-click damages — right-click must NOT despawn mobs.
-  if (i.action != 2) return;
+  // PM InteractPacket: 1=RIGHT_CLICK (mount/use/shear), 2=LEFT_CLICK (attack)
 
   auto* e = entities_.get(i.target);
-  if (!e || e->closed || e->level != p.level) return;
-  if (e->kind == entity::EntityKind::ItemDrop) return;
+  player::Player* victim = nullptr;
+  if (!e || e->closed || e->level != p.level) {
+    // Target may be another player's runtime entity_id (not in entities_ map).
+    if (i.action != 2 || !players_) return;
+    for (auto& [_, pl] : players_->all()) {
+      if (pl.spawned && pl.entity_id == i.target && pl.level == p.level && &pl != &p &&
+          pl.death_ticks_ < 0) {
+        victim = &pl;
+        break;
+      }
+    }
+    if (!victim) return;
+    e = nullptr;
+  } else if (e->kind == entity::EntityKind::ItemDrop) {
+    return;
+  }
 
   // reach check (~6 blocks survival, ~8 creative)
-  const float dx = e->x - p.x;
-  const float dy = e->y - p.y;
-  const float dz = e->z - p.z;
+  const float tx = victim ? victim->x : e->x;
+  const float ty = victim ? victim->y : e->y;
+  const float tz = victim ? victim->z : e->z;
+  const float dx = tx - p.x;
+  const float dy = ty - p.y;
+  const float dz = tz - p.z;
   const float dist2 = dx * dx + dy * dy + dz * dz;
   const float reach = (p.gamemode == 1) ? 8.f : 6.f;
   if (dist2 > reach * reach) return;
 
+  // Right-click: sheep shear with shears (PM Sheep::shear) — mobs only
+  if (i.action == 1) {
+    if (!e || e->kind != entity::EntityKind::Sheep || e->sheared) return;
+    auto& held = p.heldItem();
+    if (held.id != item::ids::SHEARS) return;
+
+    e->sheared = true;
+    auto meta = protocol::encodeSheepMetadata(e->sheep_color, true);
+    // SetEntityData with only COLOR_INFO update is fine; full sheep meta works too
+    auto sed = protocol::encodeSetEntityData(e->eid, meta);
+    players_->broadcastNear(e->x, e->y, e->z, 64.f, sed, e->level, nullptr);
+
+    std::mt19937 rng{std::random_device{}()};
+    std::uniform_int_distribution<int> cnt(1, 3);
+    const int n = cnt(rng);
+    dropItemInWorld(e->level, e->x, e->y + 1.0f, e->z,
+                    item::ItemStack::of(item::ids::WOOL, static_cast<std::uint8_t>(n),
+                                        e->sheep_color),
+                    0.f, 0.2f, 0.f, 10);
+
+    if (p.gamemode != 1) {
+      if (item::applyDurability(held, 1)) players_->sendInventory(p);
+    }
+    return;
+  }
+
+  // Only left-click damages — right-click must NOT despawn mobs.
+  if (i.action != 2) return;
+
   // basic weapon damage table (PM subset)
   float dmg = 1.f;
+  auto& held = p.heldItem();
   if (p.gamemode == 1) {
     dmg = 20.f;
   } else {
-    const auto& held = p.heldItem();
     switch (held.id) {
       case 268: case 272: case 267: case 283: case 276: // swords wood/stone/iron/gold/diamond
         dmg = (held.id == 276) ? 7.f : (held.id == 267 || held.id == 283) ? 6.f
@@ -2265,7 +2564,35 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
         dmg = 1.f;
         break;
     }
+    // PM: sword/hoe +1 durability on entity; pick/axe/shovel +2
+    if (item::isToolItem(held.id)) {
+      int wear = 1;
+      auto k = item::toolKind(held.id);
+      if (k == item::ToolKind::Pickaxe || k == item::ToolKind::Axe || k == item::ToolKind::Shovel)
+        wear = 2;
+      if (item::applyDurability(held, wear)) players_->sendInventory(p);
+    }
   }
+
+  // Player-vs-player (pvp=off blocks; creative victims still invulnerable in damagePlayer)
+  if (victim) {
+    if (!cfg_.pvp) return;
+    // Ensure viewers see attacker swing even if client omitted Animate this tick
+    if (p.entity_id != 0) {
+      auto swing = protocol::encodeAnimate(protocol::ANIMATE_SWING_ARM, p.entity_id);
+      for (auto& [_, other] : players_->all()) {
+        if (!other.spawned || &other == &p || other.level != p.level) continue;
+        if (!other.known_players.count(p.entity_id)) continue;
+        players_->sendPacket(other, swing, false);
+      }
+    }
+    if (damagePlayer(*victim, dmg, "player")) {
+      // PM Living::knockBack after successful attack damage
+      knockbackPlayer(*victim, p.x, p.z, 0.4f);
+    }
+    return;
+  }
+  if (!e) return;
 
   e->health -= dmg;
   const auto hurt_pk = protocol::encodeEntityEvent(e->eid, protocol::ENTITY_EVENT_HURT);
@@ -2303,6 +2630,9 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
     else if (e->kind == entity::EntityKind::Chicken)
       dropItemInWorld(e->level, e->x, e->y + 0.5f, e->z, item::ItemStack::of(365, 1), 0, 0.2f, 0,
                       10); // raw chicken
+    else if (e->kind == entity::EntityKind::Sheep && !e->sheared)
+      dropItemInWorld(e->level, e->x, e->y + 0.5f, e->z,
+                      item::ItemStack::of(item::ids::WOOL, 1, e->sheep_color), 0, 0.2f, 0, 10);
     const auto eid = e->eid;
     const float ex = e->x, ey = e->y, ez = e->z;
     auto* elvl = e->level;
@@ -2405,6 +2735,7 @@ void Server::dispatchMcpePacket(player::Player& p, std::string_view buffer) {
       handleDropItem(p, buffer);
       break;
     case protocol::ANIMATE_PACKET:
+      handleAnimate(p, buffer);
       break;
     case protocol::BATCH_PACKET:
       handleBatch(p, buffer);
@@ -2519,7 +2850,7 @@ void Server::tickAutosave() {
 
 void Server::start() {
   auto& log = util::Logger::instance();
-  log.notice("MPMPESCoreCpp ", "0.4.22", " (death-respawn-btn)");
+  log.notice("MPMPESCoreCpp ", "0.4.23", " (mp-visibility-pvp-spawn)");
   log.info("Target protocol ", cfg_.protocol, " (MCPE ", cfg_.version_name, ")");
   log.info("Binding UDP ", cfg_.bind, ":", cfg_.port);
   log.info("Batch: compression-level=", cfg_.network_compression_level,
@@ -2528,6 +2859,7 @@ void Server::start() {
            " autosave=", cfg_.autosave_seconds, "s");
   log.info("Default gamemode (new players): ", cfg_.gamemode == 1 ? "creative(1)" : "survival(0)",
            "  [server.properties gamemode=]");
+  log.info("PvP: ", cfg_.pvp ? "on" : "off", "  level=", cfg_.level_name, " type=", cfg_.level_type);
 
   level::LevelSettings defs;
   defs.name = cfg_.level_name.empty() ? "world" : cfg_.level_name;
@@ -2603,6 +2935,8 @@ void Server::start() {
             plugins_.firePlayerQuit(qev);
             players_->broadcastText(std::string("\xc2\xa7") + "c[-] " + pl->username);
           }
+          // Remove world body for others before PlayerList remove + map erase
+          broadcastPlayerDespawn(*pl);
           players_->remove(ep);
         }
         plugin::SessionCloseEvent ev;

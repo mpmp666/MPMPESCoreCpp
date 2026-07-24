@@ -51,9 +51,11 @@ def main():
             elif name == "world_load":
                 log(f"HelloPython: world_load {data.get('name')} gen={data.get('generator')}")
             elif name == "block":
-                log(f"HelloPython: block action={data.get('action')} by {data.get('username')}")
+                pass  # high-freq dig/place — never log (spams console)
             else:
-                log(f"HelloPython: event {name}", level="info")
+                # skip high-freq noise
+                if name not in ("move",):
+                    log(f"HelloPython: event {name}", level="info")
 
 
 if __name__ == "__main__":

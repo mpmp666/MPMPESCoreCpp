@@ -58,6 +58,11 @@ public:
     return protocol::DIMENSION_OVERWORLD;
   }
   Vec3i spawn() const { return settings_.spawn; }
+  void setSpawn(Vec3i s) { settings_.spawn = s; }
+  // Scan nearby terrain and set spawn to center of largest flat plane.
+  // Search: 3x3 chunks around (0,0), only columns within max_dist of origin.
+  // Returns chosen spawn (also writes settings_.spawn).
+  Vec3i findAndSetAutoSpawn(int chunk_radius = 1, int max_dist = 100);
   std::int32_t time() const { return time_; }
   void setTime(std::int32_t t) { time_ = t; }
   void tickTime() {
@@ -77,6 +82,9 @@ public:
   bool setBlock(int x, int y, int z, std::uint8_t id, std::uint8_t meta = 0);
   // highest solid block Y at column, or -1 if empty
   int highestBlockY(int x, int z);
+  // Safe stand feet Y near column for portal/goto (open air above, no ceiling trap).
+  // Returns feet Y, or -1 if none found.
+  int safeStandFeetY(int x, int z);
 
   int generatorIdForStartGame() const {
     switch (settings_.generator) {

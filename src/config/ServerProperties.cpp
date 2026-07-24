@@ -114,6 +114,11 @@ void ServerProperties::applyTo(const std::unordered_map<std::string, std::string
   if (auto* v = get("always-drop-on-break")) {
     cfg.always_drop_on_break = (*v == "on" || *v == "true" || *v == "1");
   }
+  if (auto* v = get("pvp")) {
+    auto s = trim(*v);
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    cfg.pvp = (s == "on" || s == "true" || s == "1" || s == "yes");
+  }
   if (auto* v = get("autosave")) {
     try {
       cfg.autosave_seconds = std::stoi(*v);
@@ -136,6 +141,8 @@ void ServerProperties::writeDefault(std::string_view path, const server::ServerC
       << "# Default gamemode for NEW players: 0=survival 1=creative (also: survival/creative)\n"
       << "# Returning players keep mode from players/<name>.dat; use /gm in-game to switch\n"
       << "gamemode=" << cfg.gamemode << "\n"
+      << "# Player vs player combat: on/off (default on)\n"
+      << "pvp=" << (cfg.pvp ? "on" : "off") << "\n"
       << "plugins-dir=" << cfg.plugins_dir << "\n"
       << "enable-plugins=" << (cfg.enable_plugins ? "on" : "off") << "\n"
       << "# zlib level 0-9 for outbound Batch packets (higher = more CPU, less bandwidth)\n"

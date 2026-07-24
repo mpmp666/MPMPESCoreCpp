@@ -45,6 +45,8 @@ func main() {
 				logmsg(fmt.Sprintf("HelloGo: player_login %v protocol=%v", data["username"], data["protocol"]), "info")
 			case "session_open":
 				logmsg(fmt.Sprintf("HelloGo: session_open %v:%v", data["address"], data["port"]), "info")
+			case "block", "move":
+				// high-freq — never log (spams console on dig/place)
 			default:
 				logmsg("HelloGo: event "+name, "info")
 			}

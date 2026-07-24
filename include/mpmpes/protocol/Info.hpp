@@ -166,6 +166,8 @@ inline constexpr std::uint8_t DATA_AIR = 1;
 inline constexpr std::uint8_t DATA_NAMETAG = 2;
 inline constexpr std::uint8_t DATA_SHOW_NAMETAG = 3;
 inline constexpr std::uint8_t DATA_NO_AI = 15;
+// Sheep wool color / sheared flag (PM Sheep::DATA_COLOR_INFO = 16; bit4 = sheared)
+inline constexpr std::uint8_t DATA_COLOR_INFO = 16;
 
 // Common block IDs
 inline constexpr std::uint8_t BLOCK_AIR = 0;

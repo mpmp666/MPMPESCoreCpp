@@ -136,10 +136,17 @@ inline constexpr std::int16_t WOODEN_SHOVEL = 269;
 inline constexpr std::int16_t WOODEN_PICKAXE = 270;
 inline constexpr std::int16_t WOODEN_AXE = 271;
 inline constexpr std::int16_t STONE_SWORD = 272;
+inline constexpr std::int16_t STONE_SHOVEL = 273;
 inline constexpr std::int16_t STONE_PICKAXE = 274;
 inline constexpr std::int16_t STONE_AXE = 275;
 inline constexpr std::int16_t DIAMOND_SWORD = 276;
+inline constexpr std::int16_t DIAMOND_SHOVEL = 277;
 inline constexpr std::int16_t DIAMOND_PICKAXE = 278;
+inline constexpr std::int16_t DIAMOND_AXE = 279;
+inline constexpr std::int16_t GOLDEN_SWORD = 283;
+inline constexpr std::int16_t GOLDEN_SHOVEL = 284;
+inline constexpr std::int16_t GOLDEN_PICKAXE = 285;
+inline constexpr std::int16_t GOLDEN_AXE = 286;
 inline constexpr std::int16_t STICK = 280;
 inline constexpr std::int16_t BOWL = 281;
 inline constexpr std::int16_t MUSHROOM_STEW = 282;
@@ -326,12 +333,20 @@ inline std::vector<ItemStack> creativeItems() {
   add(FLINT_STEEL);
   add(SHEARS);
   add(BED);
-  add(TORCH);
   add(SIGN);
+  // Spawn eggs (PM creative order subset; meta = network entity type)
+  // Place near tools so they are easier to find than buried at list end.
+  add(SPAWN_EGG, 13); // sheep
   add(SPAWN_EGG, 12); // pig
-  add(SPAWN_EGG, 10); // chicken
   add(SPAWN_EGG, 11); // cow
+  add(SPAWN_EGG, 10); // chicken
+  add(SPAWN_EGG, 14); // wolf
+  add(SPAWN_EGG, 15); // villager
+  add(SPAWN_EGG, 16); // mooshroom
   add(SPAWN_EGG, 32); // zombie
+  add(SPAWN_EGG, 33); // creeper
+  add(SPAWN_EGG, 34); // skeleton
+  add(SPAWN_EGG, 35); // spider
   return v;
 }
 
@@ -353,9 +368,9 @@ inline std::vector<ItemStack> starterInventory(bool creative) {
     slots[2] = ItemStack::of(ids::DIRT);
     slots[3] = ItemStack::of(ids::PLANKS);
     slots[4] = ItemStack::of(ids::TORCH, 64);
-    slots[5] = ItemStack::of(ids::LOG, 64);
-    slots[6] = ItemStack::of(ids::SPAWN_EGG, 16, 12);
-    slots[7] = ItemStack::of(ids::SPAWN_EGG, 16, 32);
+    slots[5] = ItemStack::of(ids::SHEARS);
+    slots[6] = ItemStack::of(ids::SPAWN_EGG, 16, 13); // sheep
+    slots[7] = ItemStack::of(ids::SPAWN_EGG, 16, 12); // pig
     slots[8] = ItemStack::of(ids::DIAMOND_SWORD);
   } else {
     slots[0] = ItemStack::of(ids::WOODEN_PICKAXE);
@@ -370,6 +385,110 @@ inline std::vector<ItemStack> starterInventory(bool creative) {
 inline std::uint8_t itemToBlockId(std::int16_t item_id) {
   if (item_id > 0 && item_id < 256) return static_cast<std::uint8_t>(item_id);
   return 0;
+}
+
+// --- Tool durability (PM Tool.php / Shears / FlintSteel subset) ---
+// damage field = uses so far; break when damage >= maxDurability
+
+enum class ToolKind { None, Sword, Pickaxe, Axe, Shovel, Hoe, Shears, FlintSteel, Bow };
+
+inline ToolKind toolKind(std::int16_t id) {
+  using namespace ids;
+  switch (id) {
+    case WOODEN_SWORD:
+    case STONE_SWORD:
+    case IRON_SWORD:
+    case DIAMOND_SWORD:
+    case GOLDEN_SWORD:
+      return ToolKind::Sword;
+    case WOODEN_PICKAXE:
+    case STONE_PICKAXE:
+    case IRON_PICKAXE:
+    case DIAMOND_PICKAXE:
+    case GOLDEN_PICKAXE:
+      return ToolKind::Pickaxe;
+    case WOODEN_AXE:
+    case STONE_AXE:
+    case IRON_AXE:
+    case DIAMOND_AXE:
+    case GOLDEN_AXE:
+      return ToolKind::Axe;
+    case WOODEN_SHOVEL:
+    case STONE_SHOVEL:
+    case IRON_SHOVEL:
+    case DIAMOND_SHOVEL:
+    case GOLDEN_SHOVEL:
+      return ToolKind::Shovel;
+    case SHEARS:
+      return ToolKind::Shears;
+    case FLINT_STEEL:
+      return ToolKind::FlintSteel;
+    case BOW:
+      return ToolKind::Bow;
+    default:
+      return ToolKind::None;
+  }
+}
+
+inline bool isToolItem(std::int16_t id) { return toolKind(id) != ToolKind::None; }
+
+// PM Tool::getMaxDurability tiers + shears/flint/bow
+inline int maxDurability(std::int16_t id) {
+  using namespace ids;
+  switch (id) {
+    // wooden
+    case WOODEN_SWORD:
+    case WOODEN_PICKAXE:
+    case WOODEN_AXE:
+    case WOODEN_SHOVEL:
+      return 60;
+    // gold
+    case GOLDEN_SWORD:
+    case GOLDEN_PICKAXE:
+    case GOLDEN_AXE:
+    case GOLDEN_SHOVEL:
+      return 33;
+    // stone
+    case STONE_SWORD:
+    case STONE_PICKAXE:
+    case STONE_AXE:
+    case STONE_SHOVEL:
+      return 132;
+    // iron
+    case IRON_SWORD:
+    case IRON_PICKAXE:
+    case IRON_AXE:
+    case IRON_SHOVEL:
+      return 251;
+    // diamond
+    case DIAMOND_SWORD:
+    case DIAMOND_PICKAXE:
+    case DIAMOND_AXE:
+    case DIAMOND_SHOVEL:
+      return 1562;
+    case FLINT_STEEL:
+      return 65;
+    case SHEARS:
+      return 239;
+    case BOW:
+      return 385;
+    default:
+      return 0;
+  }
+}
+
+// Apply wear to a tool stack. Returns true if stack changed (including broke → air).
+// amount: dig/shear/flint usually 1; tool-as-weapon on entity for pick/axe/shovel is 2 (PM).
+inline bool applyDurability(ItemStack& s, int amount = 1) {
+  if (s.empty() || amount <= 0) return false;
+  const int maxd = maxDurability(s.id);
+  if (maxd <= 0) return false;
+  s.damage = static_cast<std::int16_t>(s.damage + amount);
+  if (s.damage >= maxd) {
+    s = ItemStack::air();
+    return true;
+  }
+  return true;
 }
 
 // Fuel burn ticks (PM Fuel::$duration subset; 20 ticks = 1s)

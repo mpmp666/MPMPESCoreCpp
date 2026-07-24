@@ -38,6 +38,8 @@ rl.on("line", (line) => {
       log(`HelloNode: player_login ${data.username} protocol=${data.protocol}`);
     } else if (name === "session_open") {
       log(`HelloNode: session_open ${data.address}:${data.port}`);
+    } else if (name === "block" || name === "move") {
+      // high-freq dig/place — never log (spams console)
     } else {
       log(`HelloNode: event ${name}`);
     }

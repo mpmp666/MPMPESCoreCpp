@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -385,6 +386,26 @@ void PlayerManager::doLoginSequence(Player& p) {
     p.x = static_cast<float>(spawn.x) + 0.5f;
     p.y = static_cast<float>(spawn.y);
     p.z = static_cast<float>(spawn.z) + 0.5f;
+  } else {
+    // Saved coords may be void / under nether ceiling after gen changes — snap if unsafe.
+    const int bx = static_cast<int>(std::floor(p.x));
+    const int bz = static_cast<int>(std::floor(p.z));
+    const int feet = p.level->safeStandFeetY(bx, bz);
+    const bool bad_y = p.y < 1.f || p.y > 126.f || (feet >= 1 && std::fabs(p.y - static_cast<float>(feet)) > 24.f);
+    const bool no_floor = feet < 1 && p.y < 40.f;
+    if (bad_y || no_floor) {
+      if (feet >= 1) {
+        p.x = static_cast<float>(bx) + 0.5f;
+        p.y = static_cast<float>(feet);
+        p.z = static_cast<float>(bz) + 0.5f;
+      } else {
+        p.x = static_cast<float>(spawn.x) + 0.5f;
+        p.y = static_cast<float>(spawn.y);
+        p.z = static_cast<float>(spawn.z) + 0.5f;
+      }
+      util::Logger::instance().notice(p.username, " unsafe saved pos; snapped to ", p.x, ",",
+                                      p.y, ",", p.z, " in ", p.level->name());
+    }
   }
   if (!loaded && p.gamemode < 0) p.gamemode = p.level->settings().gamemode;
   p.state = PlayerState::LoggingIn;

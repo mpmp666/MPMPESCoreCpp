@@ -52,6 +52,7 @@ private:
   void handleContainerSetSlot(player::Player& p, std::string_view buffer);
   void handleCraftingEvent(player::Player& p, std::string_view buffer);
   void handleInteract(player::Player& p, std::string_view buffer);
+  void handleAnimate(player::Player& p, std::string_view buffer);
   void handleDropItem(player::Player& p, std::string_view buffer);
   void handleBuiltinCommand(player::Player& p, std::string_view cmd, std::string_view args);
 
@@ -79,13 +80,22 @@ private:
                          bool from_portal = false);
   void tickPlayerPortals();
   // Survival: fall / fire / lava; respawn after death
-  void damagePlayer(player::Player& p, float amount, const char* cause);
+  // Returns true if damage was applied (not blocked by creative / i-frames / already dead)
+  bool damagePlayer(player::Player& p, float amount, const char* cause);
+  // PM Living::knockBack — send SetEntityMotion to victim (eid 0) + viewers
+  void knockbackPlayer(player::Player& victim, float from_x, float from_z, float base = 0.4f);
   void tickPlayerDamage();
   void respawnPlayer(player::Player& p);
   void broadcastBlockUpdate(level::Level* level, int x, int y, int z, std::uint8_t id,
                             std::uint8_t meta, player::Player* except = nullptr);
   void spawnEntityToPlayer(player::Player& p, const entity::Entity& e);
   void syncEntitiesToPlayer(player::Player& p);
+  // Multiplayer visibility: AddPlayer / RemovePlayer + MovePlayer relay
+  void spawnPlayerToPlayer(player::Player& viewer, const player::Player& target);
+  void despawnPlayerFrom(player::Player& viewer, const player::Player& target);
+  void syncPlayersToPlayer(player::Player& p);
+  void broadcastPlayerSpawn(const player::Player& joined);
+  void broadcastPlayerDespawn(const player::Player& left);
   void tickEntities();
   void tickItemPickups();
   void tickFurnaces();

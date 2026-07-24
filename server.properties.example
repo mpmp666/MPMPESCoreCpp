@@ -4,10 +4,12 @@ server-port=19132
 server-ip=0.0.0.0
 max-players=20
 level-name=world
-level-type=flat
+level-type=normal
 # Default gamemode for NEW players: 0=survival 1=creative (also: survival/creative)
 # Returning players keep mode from players/<name>.dat; use /gm in-game to switch
-gamemode=1
+gamemode=0
+# Player vs player combat: on/off (default on)
+pvp=on
 plugins-dir=plugins
 enable-plugins=on
 # zlib level 0-9 for outbound Batch packets (higher = more CPU, less bandwidth)

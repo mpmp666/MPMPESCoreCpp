@@ -37,7 +37,7 @@ struct Player {
   level::Level* level = nullptr;
   float x = 0, y = 5, z = 0;
   float yaw = 0, pitch = 0;
-  int gamemode = 1; // default creative for dig/place testing
+  int gamemode = 0; // overwritten by server.properties / players.dat on login
   int health = 20;
   int chunk_radius = 4;
   bool spawned = false;
@@ -89,6 +89,8 @@ struct Player {
 
   std::set<std::pair<int, int>> sent_chunks;
   std::set<std::int64_t> known_entities;
+  // Other players' runtime entity_ids currently shown via AddPlayer (not mobs)
+  std::set<std::int64_t> known_players;
 
   std::string key() const {
     return endpoint.address + ":" + std::to_string(endpoint.port);

@@ -103,12 +103,8 @@ void mpmpes_on_command(MpmpesEventCommand* ev) {
 }
 
 void mpmpes_on_block(const MpmpesEventBlock* ev) {
-  if (!g_host || !g_host->log_info || !ev) return;
-  if (ev->action != 2) return; /* stop break */
-  char buf[256];
-  snprintf(buf, sizeof(buf), "HelloC: block break by %s @ %d,%d,%d",
-           ev->username ? ev->username : "?", (int)ev->x, (int)ev->y, (int)ev->z);
-  g_host->log_info(buf);
+  /* Example only — do not log every dig/place (spams console / panel). */
+  (void)ev;
 }
 
 void mpmpes_on_world_load(const MpmpesEventWorldLoad* ev) {

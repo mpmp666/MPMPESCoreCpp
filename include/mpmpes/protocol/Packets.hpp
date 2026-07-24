@@ -81,6 +81,37 @@ inline std::string encodeEntityEvent(std::int64_t eid, std::uint8_t event) {
   return out.buffer();
 }
 
+// Animate 0xb2 — arm swing etc (PM: action byte + eid long)
+// action 1 = swing arm (PE 0.14)
+inline constexpr std::uint8_t ANIMATE_SWING_ARM = 1;
+
+inline std::string encodeAnimate(std::uint8_t action, std::int64_t eid) {
+  binary::BinaryStream out;
+  out.putByte(ANIMATE_PACKET);
+  out.putByte(action);
+  out.putLong(eid);
+  return out.buffer();
+}
+
+struct AnimateDecoded {
+  std::uint8_t action = 0;
+  std::int64_t eid = 0;
+  bool ok = false;
+};
+
+inline AnimateDecoded decodeAnimate(std::string_view buffer) {
+  AnimateDecoded d;
+  try {
+    binary::BinaryStream in{std::string(buffer)};
+    if (in.getByte() != ANIMATE_PACKET) return d;
+    d.action = in.getByte();
+    d.eid = in.getLong();
+    d.ok = true;
+  } catch (...) {
+  }
+  return d;
+}
+
 // Respawn 0xb3
 inline std::string encodeRespawn(float x, float y, float z) {
   binary::BinaryStream out;
@@ -248,6 +279,15 @@ inline std::string encodeRemoveEntity(std::int64_t eid) {
   return out.buffer();
 }
 
+// RemovePlayer 0x97 — PE Human despawn (eid + uuid)
+inline std::string encodeRemovePlayer(std::int64_t eid, const std::array<std::uint8_t, 16>& uuid) {
+  binary::BinaryStream out;
+  out.putByte(REMOVE_PLAYER_PACKET);
+  out.putLong(eid);
+  out.put(std::string_view(reinterpret_cast<const char*>(uuid.data()), 16));
+  return out.buffer();
+}
+
 // Minimal metadata terminator for AddEntity
 inline std::string encodeEmptyMetadata() {
   // DATA_FLAGS byte 0, DATA_AIR short 300, DATA_SHOW_NAMETAG 1, terminator 0x7f
@@ -263,6 +303,87 @@ inline std::string encodeEmptyMetadata() {
   m.push_back(0); // AI enabled
   m.push_back(0x7f);
   return m;
+}
+
+// Sheep metadata: base + DATA_COLOR_INFO (color | 0x10 if sheared)
+inline std::string encodeSheepMetadata(std::uint8_t color, bool sheared) {
+  std::string m;
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_FLAGS & 0x1f)));
+  m.push_back(0);
+  m.push_back(static_cast<char>((DATA_TYPE_SHORT << 5) | (DATA_AIR & 0x1f)));
+  m.push_back(static_cast<char>(300 & 0xff));
+  m.push_back(static_cast<char>((300 >> 8) & 0xff));
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_SHOW_NAMETAG & 0x1f)));
+  m.push_back(1);
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_NO_AI & 0x1f)));
+  m.push_back(0);
+  std::uint8_t c = static_cast<std::uint8_t>(color & 0x0f);
+  if (sheared) c = static_cast<std::uint8_t>(c | 0x10);
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_COLOR_INFO & 0x1f)));
+  m.push_back(static_cast<char>(c));
+  m.push_back(0x7f);
+  return m;
+}
+
+// SetEntityData 0xad — long eid + metadata blob (same format as AddEntity meta)
+inline std::string encodeSetEntityData(std::int64_t eid, std::string_view metadata) {
+  binary::BinaryStream out;
+  out.putByte(SET_ENTITY_DATA_PACKET);
+  out.putLong(eid);
+  out.put(metadata);
+  return out.buffer();
+}
+
+// Player/Human metadata for AddPlayer (nametag + show nametag)
+inline std::string encodePlayerMetadata(std::string_view nametag) {
+  std::string m;
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_FLAGS & 0x1f)));
+  m.push_back(0);
+  m.push_back(static_cast<char>((DATA_TYPE_SHORT << 5) | (DATA_AIR & 0x1f)));
+  m.push_back(static_cast<char>(300 & 0xff));
+  m.push_back(static_cast<char>((300 >> 8) & 0xff));
+  // DATA_NAMETAG string (LShort len + bytes) — PE writeMetadata STRING type
+  m.push_back(static_cast<char>((DATA_TYPE_STRING << 5) | (DATA_NAMETAG & 0x1f)));
+  const auto n = static_cast<std::uint16_t>(std::min(nametag.size(), static_cast<std::size_t>(0xffff)));
+  m.push_back(static_cast<char>(n & 0xff));
+  m.push_back(static_cast<char>((n >> 8) & 0xff));
+  m.append(nametag.data(), n);
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_SHOW_NAMETAG & 0x1f)));
+  m.push_back(1);
+  m.push_back(static_cast<char>((DATA_TYPE_BYTE << 5) | (DATA_NO_AI & 0x1f)));
+  m.push_back(0);
+  m.push_back(0x7f);
+  return m;
+}
+
+// AddPlayer 0x96 — world entity for another human (PM Human::spawnTo)
+// uuid(16) + name + eid + xyz + speed xyz + yaw + headYaw + pitch + slot + metadata
+inline std::string encodeAddPlayer(const std::array<std::uint8_t, 16>& uuid, std::string_view username,
+                                   std::int64_t eid, float x, float y, float z, float yaw, float pitch,
+                                   const item::ItemStack& held = item::ItemStack::air(),
+                                   std::string_view metadata = {}) {
+  binary::BinaryStream out;
+  out.putByte(ADD_PLAYER_PACKET);
+  out.put(std::string_view(reinterpret_cast<const char*>(uuid.data()), 16));
+  out.putString(username);
+  out.putLong(eid);
+  out.putFloat(x);
+  out.putFloat(y);
+  out.putFloat(z);
+  out.putFloat(0.f); // speedX
+  out.putFloat(0.f); // speedY
+  out.putFloat(0.f); // speedZ
+  out.putFloat(yaw);
+  out.putFloat(yaw); // head rotation (PM: yaw twice)
+  out.putFloat(pitch);
+  item::putSlot(out, held);
+  if (metadata.empty()) {
+    auto meta = encodePlayerMetadata(username);
+    out.put(meta);
+  } else {
+    out.put(metadata);
+  }
+  return out.buffer();
 }
 
 inline std::string encodeAddEntity(std::int64_t eid, std::int32_t type, float x, float y, float z,
@@ -331,10 +452,11 @@ inline std::string encodeTakeItemEntity(std::int64_t target_item_eid, std::int64
   return out.buffer();
 }
 
-// SetEntityMotion 0xae
+// SetEntityMotion 0xae — PM: int count + (long eid, float mx,my,mz)*
 inline std::string encodeSetEntityMotion(std::int64_t eid, float mx, float my, float mz) {
   binary::BinaryStream out;
   out.putByte(SET_ENTITY_MOTION_PACKET);
+  out.putInt(1);
   out.putLong(eid);
   out.putFloat(mx);
   out.putFloat(my);
