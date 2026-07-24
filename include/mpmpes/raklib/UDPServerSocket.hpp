@@ -6,6 +6,8 @@
 #include <string_view>
 #include <utility>
 
+#include <netinet/in.h>
+
 namespace mpmpes::raklib {
 
 struct Endpoint {
@@ -36,6 +38,11 @@ public:
 
   // Returns bytes sent, or 0 on would-block / error.
   std::size_t writePacket(std::string_view data, const Endpoint& to);
+  // Fast path: skip inet_pton (use cached sockaddr from Session).
+  std::size_t writePacketTo(std::string_view data, const sockaddr_in& dst);
+
+  // Wait until readable or timeout_ms. Returns true if readable.
+  bool waitReadable(int timeout_ms);
 
   void setRecvBuffer(int size);
   void setSendBuffer(int size);

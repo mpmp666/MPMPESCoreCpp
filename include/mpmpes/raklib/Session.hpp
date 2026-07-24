@@ -55,6 +55,8 @@ public:
 
   // Queue an encapsulated packet toward the client.
   void addEncapsulated(EncapsulatedPacket packet, bool immediate = false);
+  // Flush pending ACK/NACK immediately (low-latency path after inbound datagrams).
+  void flushAcks();
 
   void setHandlers(EncapsulatedHandler on_encap, SessionOpenHandler on_open,
                    SessionCloseHandler on_close) {
@@ -86,6 +88,8 @@ private:
 
   SessionManager& manager_;
   Endpoint endpoint_;
+  sockaddr_in cached_dst_{}; // resolved once for sendto fast-path
+  bool cached_dst_ok_ = false;
   std::int64_t server_id_;
   std::int64_t client_id_ = 0;
   SessionState state_ = SessionState::Unconnected;
@@ -93,6 +97,8 @@ private:
   bool active_ = false;
   bool closed_ = false;
   double last_update_ = 0.0;
+  // RTO-like recovery resend delay (seconds). PHP-like ~0.5s feels snappier than 8s.
+  static constexpr double kRecoveryResendDelay = 0.5;
 
   std::uint16_t mtu_size_ = 548;
   std::uint32_t message_index_ = 0;

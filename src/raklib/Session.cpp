@@ -11,6 +11,9 @@
 #include <cstring>
 #include <sstream>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 namespace mpmpes::raklib {
 namespace {
 namespace Binary = mpmpes::binary::Binary;
@@ -29,10 +32,38 @@ Session::Session(SessionManager& manager, Endpoint endpoint, std::int64_t server
     : manager_(manager), endpoint_(std::move(endpoint)), server_id_(server_id) {
   send_queue_.id = 0x84;
   for (auto& c : channel_index_) c = 0;
+  // Cache sockaddr once — avoid inet_pton on every UDP send.
+  cached_dst_ = {};
+  cached_dst_.sin_family = AF_INET;
+  cached_dst_.sin_port = htons(endpoint_.port);
+  cached_dst_ok_ =
+      ::inet_pton(AF_INET, endpoint_.address.c_str(), &cached_dst_.sin_addr) == 1;
 }
 
 void Session::sendBytes(std::string_view data) {
-  manager_.sendRaw(data, endpoint_);
+  if (cached_dst_ok_) {
+    // Fast path via SessionManager socket (writePacketTo)
+    manager_.sendRawTo(data, cached_dst_);
+  } else {
+    manager_.sendRaw(data, endpoint_);
+  }
+}
+
+void Session::flushAcks() {
+  if (!ack_queue_.empty()) {
+    AcknowledgePacket ack;
+    ack.id = ID_ACK;
+    ack.packets.assign(ack_queue_.begin(), ack_queue_.end());
+    sendBytes(ack.encode());
+    ack_queue_.clear();
+  }
+  if (!nack_queue_.empty()) {
+    AcknowledgePacket nack;
+    nack.id = ID_NACK;
+    nack.packets.assign(nack_queue_.begin(), nack_queue_.end());
+    sendBytes(nack.encode());
+    nack_queue_.clear();
+  }
 }
 
 void Session::putAddress(BinaryStream& out, std::string_view addr, std::uint16_t port) {
@@ -150,31 +181,19 @@ void Session::update(double now) {
   }
   active_ = false;
 
-  if (!ack_queue_.empty()) {
-    AcknowledgePacket ack;
-    ack.id = ID_ACK;
-    ack.packets.assign(ack_queue_.begin(), ack_queue_.end());
-    sendBytes(ack.encode());
-    ack_queue_.clear();
-  }
-  if (!nack_queue_.empty()) {
-    AcknowledgePacket nack;
-    nack.id = ID_NACK;
-    nack.packets.assign(nack_queue_.begin(), nack_queue_.end());
-    sendBytes(nack.encode());
-    nack_queue_.clear();
-  }
+  flushAcks();
 
-  int limit = 16;
+  // Drain more outbound recovery/queued datagrams per tick (was 16).
+  int limit = 64;
   while (!packet_to_send_.empty() && limit-- > 0) {
     auto pk = std::move(packet_to_send_.front());
     packet_to_send_.pop_front();
     sendDatagram(std::move(pk), now);
   }
 
-  // resend old recovery
+  // Faster unacked resend (~0.5s) for snappier recovery on lossy links.
   for (auto it = recovery_queue_.begin(); it != recovery_queue_.end();) {
-    if (it->second.send_time < (now - 8.0)) {
+    if (it->second.send_time < (now - kRecoveryResendDelay)) {
       auto pk = it->second;
       pk.seq_number = send_seq_++;
       packet_to_send_.push_back(std::move(pk));
@@ -182,6 +201,13 @@ void Session::update(double now) {
     } else {
       ++it;
     }
+  }
+  // Immediately push rescheduled recovery this tick when possible
+  limit = 64;
+  while (!packet_to_send_.empty() && limit-- > 0) {
+    auto pk = std::move(packet_to_send_.front());
+    packet_to_send_.pop_front();
+    sendDatagram(std::move(pk), now);
   }
 
   for (auto it = received_window_.begin(); it != received_window_.end();) {

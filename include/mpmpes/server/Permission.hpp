@@ -112,10 +112,11 @@ inline PermLevel commandRequiredLevel(std::string_view cmd) {
     return PermLevel::Player;
   // operator
   if (cmd == "gm" || cmd == "gamemode" || cmd == "give" || cmd == "spawnmob" || cmd == "summon" ||
-      cmd == "clear" || cmd == "goto" || cmd == "op" || cmd == "deop" || cmd == "stop" ||
-      cmd == "kick" || cmd == "ban" || cmd == "unban" || cmd == "pardon" || cmd == "ban-ip" ||
-      cmd == "banip" || cmd == "unban-ip" || cmd == "pardon-ip" || cmd == "ban-cid" ||
-      cmd == "bancid" || cmd == "unban-cid" || cmd == "pardon-cid" || cmd == "banlist")
+      cmd == "clear" || cmd == "goto" || cmd == "fuck" || cmd == "op" || cmd == "deop" ||
+      cmd == "stop" || cmd == "kick" || cmd == "ban" || cmd == "unban" || cmd == "pardon" ||
+      cmd == "ban-ip" || cmd == "banip" || cmd == "unban-ip" || cmd == "pardon-ip" ||
+      cmd == "ban-cid" || cmd == "bancid" || cmd == "unban-cid" || cmd == "pardon-cid" ||
+      cmd == "banlist")
     return PermLevel::Op;
   // unknown: still Player so we can reply "unknown" rather than silent deny
   return PermLevel::Player;

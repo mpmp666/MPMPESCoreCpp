@@ -87,6 +87,10 @@ struct Player {
   int hurt_cooldown_ = 0;   // i-frames after damage
   int death_ticks_ = -1;    // >=0 while dead awaiting respawn
 
+  // Client sky/atmosphere dim override (any wire value). -1 = follow level.
+  // Used by visual-dim experiments without world switch; not remapped/whitelist-filtered.
+  int visual_dim = -1;
+
   std::set<std::pair<int, int>> sent_chunks;
   std::set<std::int64_t> known_entities;
   // Other players' runtime entity_ids currently shown via AddPlayer (not mobs)
@@ -116,12 +120,18 @@ struct Player {
     return const_cast<Player*>(this)->heldItem();
   }
 
-  // Wire hotbar array for ContainerSetContent (PM: index + 9, or -1)
+  // Wire hotbar array for ContainerSetContent (PM: index + 9, or -1).
+  // Clamp links so client never sees out-of-range inv indices (Win PE crash risk on E).
   std::vector<std::int32_t> wireHotbar() const {
     std::vector<std::int32_t> hb(9, -1);
+    const int inv_n = static_cast<int>(inventory.size());
     for (int i = 0; i < 9; ++i) {
-      const int inv = hotbar_link[static_cast<std::size_t>(i)];
-      hb[static_cast<std::size_t>(i)] = inv <= -1 ? -1 : inv + 9;
+      int inv = hotbar_link[static_cast<std::size_t>(i)];
+      if (inv < 0 || (inv_n > 0 && inv >= inv_n)) {
+        hb[static_cast<std::size_t>(i)] = -1;
+      } else {
+        hb[static_cast<std::size_t>(i)] = inv + 9;
+      }
     }
     return hb;
   }

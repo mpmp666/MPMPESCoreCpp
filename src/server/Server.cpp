@@ -362,9 +362,12 @@ void Server::changePlayerWorld(player::Player& p, level::Level* target, float x,
   }
 
   closeContainer(p, true);
-  const auto from_dim =
-      p.level ? p.level->protocolDimension() : protocol::DIMENSION_OVERWORLD;
+  // Effective client dim may be a /dim override; clear override on real world switch.
+  const auto from_dim = (p.visual_dim >= 0)
+                            ? static_cast<std::uint8_t>(p.visual_dim)
+                            : (p.level ? p.level->protocolDimension() : protocol::DIMENSION_OVERWORLD);
   const auto to_dim = target->protocolDimension(); // PE 0.14: only 0/1 (never 2)
+  p.visual_dim = -1;
 
   // Despawn this player from others in old world before level switch
   broadcastPlayerDespawn(p);
@@ -408,11 +411,55 @@ void Server::changePlayerWorld(player::Player& p, level::Level* target, float x,
   players_->sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_PLAYER_SPAWN), true);
   players_->sendPacket(
       p, protocol::encodeMovePlayer(0, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 1, true), true);
-  players_->sendInventory(p);
+  // PM setGamemode: creative palette before inventory contents
   if (p.gamemode == 1) players_->sendCreativeContents(p);
+  players_->sendInventory(p);
   syncEntitiesToPlayer(p);
   syncPlayersToPlayer(p);
   broadcastPlayerSpawn(p);
+}
+
+void Server::applyPlayerVisualDim(player::Player& p, std::uint8_t dim, bool reset_to_level) {
+  if (!players_ || !p.spawned || !p.level) return;
+  // Client atmosphere only: pass requested dim as-is (no whitelist / no remap).
+  const auto level_dim = p.level->protocolDimension();
+  const std::uint8_t to_dim = reset_to_level ? level_dim : dim;
+
+  const auto from_dim =
+      (p.visual_dim >= 0) ? static_cast<std::uint8_t>(p.visual_dim) : level_dim;
+
+  if (reset_to_level) {
+    p.visual_dim = -1;
+  } else {
+    p.visual_dim = static_cast<int>(to_dim);
+  }
+
+  // Soft client reload in-place: keep world/pos/entities, only sky/atmosphere changes.
+  // Always re-send StartGame with new dim; ChangeDimension when wire dim flips.
+  if (from_dim != to_dim) {
+    players_->sendPacket(p, protocol::encodeChangeDimension(to_dim), true);
+  }
+  const auto spawn = p.level->spawn();
+  players_->sendPacket(
+      p,
+      protocol::encodeStartGame(p.level->settings().seed, to_dim, p.level->generatorIdForStartGame(),
+                                p.gamemode & 0x01, 0, spawn.x, spawn.y, spawn.z, p.x, p.y, p.z),
+      true);
+  players_->sendPacket(p, protocol::encodeSetSpawnPosition(spawn.x, spawn.y, spawn.z), true);
+  players_->sendPacket(p, protocol::encodeSetTime(p.level->time(), true), true);
+  players_->sendPacket(p, protocol::encodeSetHealth(p.health), true);
+  {
+    std::int32_t flags = 0x40;
+    if (p.gamemode == 1) flags |= 0x80;
+    players_->sendPacket(p, protocol::encodeAdventureSettings(flags), true);
+    players_->sendPacket(p, protocol::encodeSetPlayerGameType(p.gamemode), true);
+  }
+  // Chunks already known; re-assert spawn + position so client finishes dim switch
+  players_->sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_PLAYER_SPAWN), true);
+  players_->sendPacket(
+      p, protocol::encodeMovePlayer(0, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 1, true), true);
+  if (p.gamemode == 1) players_->sendCreativeContents(p);
+  players_->sendInventory(p);
 }
 
 bool Server::damagePlayer(player::Player& p, float amount, const char* cause) {
@@ -1233,7 +1280,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
 
   if (cmd == "help" || cmd == "?") {
     if (static_cast<int>(level) >= static_cast<int>(PermLevel::Op)) {
-      reply("Commands: /help /list /worlds /spawn /me /ver | OP: /goto /gm /give /spawnmob "
+      reply("Commands: /help /list /worlds /spawn /me /ver | OP: /goto /fuck /gm /give /spawnmob "
             "/clear /op /deop /kick /ban /ban-ip /ban-cid /unban /banlist /stop");
     } else {
       reply("Commands: /help /list /worlds /spawn /me /ver /version");
@@ -1242,7 +1289,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
   }
 
   if (cmd == "ver" || cmd == "version") {
-    reply(std::string("MPMPESCoreCpp 0.4.23 (mp-visibility-pvp-spawn) | MCPE ") + cfg_.version_name +
+    reply(std::string("MPMPESCoreCpp 0.4.24 (plugins-c-py-perf) | MCPE ") + cfg_.version_name +
           " protocol " + std::to_string(cfg_.protocol));
     return;
   }
@@ -1326,6 +1373,35 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     return;
   }
 
+  if (cmd == "fuck") {
+    // /fuck [player] — OP/console: client atmosphere only, send wire dim=2.
+    std::string target_tok = trim(std::string(args));
+    if (!target_tok.empty()) {
+      auto sp = target_tok.find(' ');
+      if (sp != std::string::npos) target_tok = trim(target_tok.substr(0, sp));
+    }
+
+    player::Player* target = player;
+    if (!target_tok.empty()) {
+      target = findPlayerByName(target_tok);
+      if (!target) {
+        reply("Player not online: " + target_tok);
+        return;
+      }
+    } else if (!player) {
+      reply("Usage: /fuck [player]   (console needs a player name)");
+      return;
+    }
+    if (!target->spawned || !target->level) {
+      reply("Target not fully spawned");
+      return;
+    }
+
+    applyPlayerVisualDim(*target, protocol::DIMENSION_END_INTERNAL, false);
+    reply(std::string("已法克(") + target->username + ")");
+    return;
+  }
+
   if (cmd == "gm" || cmd == "gamemode") {
     // /gm [mode] [player]
     //  - no args: toggle self (in-game only)
@@ -1393,8 +1469,8 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     if (target->gamemode == 1) flags |= 0x80;
     players_->sendPacket(*target, protocol::encodeAdventureSettings(flags), true);
     target->inventory = item::starterInventory(target->gamemode == 1);
-    players_->sendInventory(*target);
     if (target->gamemode == 1) players_->sendCreativeContents(*target);
+    players_->sendInventory(*target);
     const char* mode_s = target->gamemode == 1 ? "CREATIVE" : "SURVIVAL";
     if (player && target == player) {
       reply(std::string("Gamemode: ") + mode_s);
@@ -2084,8 +2160,8 @@ void Server::handleContainerClose(player::Player& p, std::string_view buffer) {
   if (p.open_window_id != 0 && (wid == p.open_window_id || wid == 0)) {
     closeContainer(p, false); // client already closed UI
   }
-  players_->sendInventory(p);
   if (p.gamemode == 1) players_->sendCreativeContents(p);
+  players_->sendInventory(p);
 }
 
 void Server::handleUseItem(player::Player& p, std::string_view buffer) {
@@ -2850,7 +2926,7 @@ void Server::tickAutosave() {
 
 void Server::start() {
   auto& log = util::Logger::instance();
-  log.notice("MPMPESCoreCpp ", "0.4.23", " (mp-visibility-pvp-spawn)");
+  log.notice("MPMPESCoreCpp ", "0.4.24", " (plugins-c-py-perf)");
   log.info("Target protocol ", cfg_.protocol, " (MCPE ", cfg_.version_name, ")");
   log.info("Binding UDP ", cfg_.bind, ":", cfg_.port);
   log.info("Batch: compression-level=", cfg_.network_compression_level,
@@ -2975,13 +3051,30 @@ void Server::start() {
 
 void Server::networkThreadMain() {
   using namespace std::chrono_literals;
+  // Low-latency network loop:
+  // - poll UDP with short timeout instead of fixed 2ms sleep
+  // - if packets arrived, tick again immediately (no sleep)
+  int idle_spins = 0;
   while (running_) {
+    // Wait up to 1ms for inbound UDP when idle (reduces wake latency vs sleep_for).
+    if (socket_.isOpen()) {
+      socket_.waitReadable(idle_spins > 0 ? 1 : 0);
+    }
+    int handled = 0;
     {
       std::lock_guard<std::mutex> lock(game_mutex_);
-      if (sessions_) sessions_->tick();
+      if (sessions_) handled = sessions_->tick();
     }
-    // short sleep so we don't spin; game tick still owns 50ms cadence
-    std::this_thread::sleep_for(2ms);
+    if (handled > 0) {
+      idle_spins = 0;
+      continue; // hot path: drain again ASAP
+    }
+    // Idle: tiny yield so we don't peg a full core when nobody is online.
+    ++idle_spins;
+    if (idle_spins > 8) {
+      std::this_thread::sleep_for(1ms);
+      idle_spins = 0;
+    }
   }
 }
 

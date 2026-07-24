@@ -56,7 +56,7 @@ cmake --build build -j"$(nproc)"
 
 ```bash
 # 示例：本机发版
-git tag v0.4.22 && git push origin v0.4.22
+git tag v0.4.24 && git push origin v0.4.24
 # 或 Actions → Build & Release → Run workflow
 ```
 
@@ -89,12 +89,10 @@ cp -n server.properties.example server.properties  # 首次
 
 | 示例 | 语言 | 依赖 |
 |------|------|------|
-| HelloC / HelloCpp | C/C++ `.so` | CMake 自动编 |
-| HelloPython | Python | `python3` |
-| HelloNode | Node.js | `node` |
-| HelloPHP | PHP | `php`（系统未装则跳过） |
-| HelloGo | Go | `cd plugins/HelloGo && go build -o hello_go` |
-| HelloRust | Rust | `cd plugins/HelloRust && cargo build --release` 并复制二进制 |
+| HelloC / HelloCpp | C/C++ `.so` 原生 | CMake 自动编 |
+| HelloPython | Python 子进程 | `python3` |
+
+仅保留 **C/C++/native** 与 **Python**。PHP / Node / Go / Rust 示例与加载路径已删除，避免额外运行时拖慢服务端。热路径约定见 `docs/PLUGINS.md`。
 
 ## 与 PHP 版对照
 

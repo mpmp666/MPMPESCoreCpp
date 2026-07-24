@@ -382,41 +382,49 @@ public:
   }
 
   void onServerStart(const ServerStartEvent& ev) override {
+    // rare event — push only, never block the main loop on process plugins
     emitEvent("server_start",
               std::string(R"({"motd":")") + jsonEscape(ev.motd) + R"(","port":)" +
-                  std::to_string(ev.port) + "}");
+                  std::to_string(ev.port) + "}",
+              0);
   }
   void onSessionOpen(const SessionOpenEvent& ev) override {
     emitEvent("session_open",
               std::string(R"({"address":")") + jsonEscape(ev.address) + R"(","port":)" +
                   std::to_string(ev.port) + R"(,"client_id":)" + std::to_string(ev.client_id) +
-                  "}");
+                  "}",
+              0);
   }
   void onSessionClose(const SessionCloseEvent& ev) override {
     emitEvent("session_close",
               std::string(R"({"address":")") + jsonEscape(ev.address) + R"(","port":)" +
-                  std::to_string(ev.port) + R"(,"reason":")" + jsonEscape(ev.reason) + "\"}");
+                  std::to_string(ev.port) + R"(,"reason":")" + jsonEscape(ev.reason) + "\"}",
+              0);
   }
   void onPlayerLogin(const PlayerLoginEvent& ev) override {
     emitEvent("player_login",
               std::string(R"({"address":")") + jsonEscape(ev.address) + R"(","port":)" +
                   std::to_string(ev.port) + R"(,"username":")" + jsonEscape(ev.username) +
                   R"(","protocol":)" + std::to_string(ev.protocol) + R"(,"client_id":)" +
-                  std::to_string(ev.client_id) + R"(,"world":")" + jsonEscape(ev.world) + "\"}");
+                  std::to_string(ev.client_id) + R"(,"world":")" + jsonEscape(ev.world) + "\"}",
+              0);
   }
   void onPlayerJoin(const PlayerJoinEvent& ev) override {
     emitEvent("player_join",
               std::string(R"({"username":")") + jsonEscape(ev.username) + R"(","world":")" +
                   jsonEscape(ev.world) + R"(","x":)" + std::to_string(ev.x) + R"(,"y":)" +
-                  std::to_string(ev.y) + R"(,"z":)" + std::to_string(ev.z) + "}");
+                  std::to_string(ev.y) + R"(,"z":)" + std::to_string(ev.z) + "}",
+              0);
   }
   void onPlayerQuit(const PlayerQuitEvent& ev) override {
     emitEvent("player_quit",
               std::string(R"({"username":")") + jsonEscape(ev.username) + R"(","reason":")" +
-                  jsonEscape(ev.reason) + "\"}");
+                  jsonEscape(ev.reason) + "\"}",
+              0);
   }
   void onChat(ChatEvent& ev) override {
     last_chat_cancel_ = false;
+    // only cancelable events wait briefly for process plugin ACK
     emitEvent("chat",
               std::string(R"({"username":")") + jsonEscape(ev.username) + R"(","message":")" +
                   jsonEscape(ev.message) + "\"}",
@@ -436,7 +444,7 @@ public:
     (void)ev;
   }
   void onBlock(const BlockEvent& ev) override {
-    // fire-and-forget: wait_ms=0 (default 50ms × N process plugins made dig/place lag)
+    // fire-and-forget: wait_ms=0 (blocking dig/place made the whole server lag)
     emitEvent("block",
               std::string(R"({"username":")") + jsonEscape(ev.username) + R"(","x":)" +
                   std::to_string(ev.x) + R"(,"y":)" + std::to_string(ev.y) + R"(,"z":)" +
@@ -447,11 +455,13 @@ public:
   void onWorldLoad(const WorldLoadEvent& ev) override {
     emitEvent("world_load",
               std::string(R"({"name":")") + jsonEscape(ev.name) + R"(","generator":)" +
-                  std::to_string(ev.generator) + R"(,"seed":)" + std::to_string(ev.seed) + "}");
+                  std::to_string(ev.generator) + R"(,"seed":)" + std::to_string(ev.seed) + "}",
+              0);
   }
 
 private:
-  void emitEvent(const char* name, const std::string& data_json, int wait_ms = 50) {
+  // default wait_ms=0: process plugins must never stall the game loop
+  void emitEvent(const char* name, const std::string& data_json, int wait_ms = 0) {
     std::ostringstream os;
     os << R"({"op":"event","name":")" << name << R"(","data":)" << data_json << "}";
     sendLine(os.str());
@@ -571,25 +581,26 @@ private:
   bool last_cmd_handled_ = false;
 };
 
-std::vector<std::string> buildProcessArgv(const config::PluginManifest& m) {
-  const auto& main_rel = m.main;
-  const auto lang = m.language;
-  if (lang == "python" || lang == "py") return {"python3", main_rel};
-  if (lang == "php") return {"php", main_rel};
-  if (lang == "nodejs" || lang == "node" || lang == "js") return {"node", main_rel};
-  if (!main_rel.empty() && main_rel[0] != '/' && main_rel.find('/') == std::string::npos) {
-    return {"./" + main_rel};
-  }
-  return {main_rel};
+std::vector<std::string> buildPythonArgv(const config::PluginManifest& m) {
+  // Only process language allowed: Python (isolated subprocess + JSON lines).
+  return {"python3", m.main};
+}
+
+bool isSupportedLanguage(std::string_view lang) {
+  return lang == "native" || lang == "c" || lang == "cpp" || lang == "c++" || lang == "python" ||
+         lang == "py";
 }
 
 bool isNativeSharedLib(const config::PluginManifest& m) {
-  const auto lang = m.language;
-  if (lang == "native" || lang == "c" || lang == "cpp" || lang == "c++" || lang == "rust" ||
-      lang == "go") {
+  const auto& lang = m.language;
+  if (lang == "native" || lang == "c" || lang == "cpp" || lang == "c++") {
     return m.main.size() >= 3 && m.main.substr(m.main.size() - 3) == ".so";
   }
   return false;
+}
+
+bool isPythonPlugin(const config::PluginManifest& m) {
+  return m.language == "python" || m.language == "py";
 }
 
 } // namespace
@@ -617,11 +628,22 @@ std::unique_ptr<IPlugin> PluginManager::tryLoadDir(const std::string& dir) {
     return nullptr;
   }
 
+  if (!isSupportedLanguage(m.language)) {
+    Logger::instance().warning(
+        "Skip plugin ", m.name, ": unsupported language '", m.language,
+        "' (only c/cpp/native and python are enabled to avoid extra runtimes)");
+    return nullptr;
+  }
   if (isNativeSharedLib(m)) {
     return std::make_unique<NativePlugin>(std::move(m));
   }
-  auto argv = buildProcessArgv(m);
-  return std::make_unique<ProcessPlugin>(std::move(m), std::move(argv));
+  if (isPythonPlugin(m)) {
+    auto argv = buildPythonArgv(m);
+    return std::make_unique<ProcessPlugin>(std::move(m), std::move(argv));
+  }
+  Logger::instance().warning("Skip plugin ", m.name, ": language=", m.language,
+                             " but main is not a loadable .so / python entry");
+  return nullptr;
 }
 
 void PluginManager::loadAll(std::string_view plugins_dir) {

@@ -1,7 +1,0 @@
-name: HelloGo
-version: 0.1.0
-api: 1.0.0
-language: go
-main: hello_go
-author: mpmpes
-description: Example Go process plugin (build with go build -o hello_go)

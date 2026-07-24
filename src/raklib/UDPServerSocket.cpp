@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -70,6 +71,13 @@ void UDPServerSocket::bind(std::string_view interface_addr, std::uint16_t port) 
 
   setRecvBuffer(1024 * 1024 * 8);
   setSendBuffer(1024 * 1024 * 8);
+#if defined(SO_BUSY_POLL)
+  // Linux low-latency busy-poll (µs). Best-effort; ignored if unsupported.
+  {
+    int us = 50;
+    ::setsockopt(fd_, SOL_SOCKET, SO_BUSY_POLL, &us, sizeof(us));
+  }
+#endif
 }
 
 void UDPServerSocket::setRecvBuffer(int size) {
@@ -111,10 +119,24 @@ std::size_t UDPServerSocket::writePacket(std::string_view data, const Endpoint& 
   if (::inet_pton(AF_INET, to.address.c_str(), &dst.sin_addr) != 1) {
     return 0;
   }
+  return writePacketTo(data, dst);
+}
+
+std::size_t UDPServerSocket::writePacketTo(std::string_view data, const sockaddr_in& dst) {
+  if (fd_ < 0 || data.empty()) return 0;
   const ssize_t n = ::sendto(fd_, data.data(), data.size(), 0,
-                             reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+                             reinterpret_cast<const sockaddr*>(&dst), sizeof(dst));
   if (n < 0) return 0;
   return static_cast<std::size_t>(n);
+}
+
+bool UDPServerSocket::waitReadable(int timeout_ms) {
+  if (fd_ < 0) return false;
+  pollfd pfd{};
+  pfd.fd = fd_;
+  pfd.events = POLLIN;
+  const int r = ::poll(&pfd, 1, timeout_ms);
+  return r > 0 && (pfd.revents & (POLLIN | POLLERR | POLLHUP)) != 0;
 }
 
 } // namespace mpmpes::raklib

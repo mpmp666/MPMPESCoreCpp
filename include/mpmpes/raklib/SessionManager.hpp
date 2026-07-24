@@ -33,9 +33,12 @@ public:
   }
 
   // Drain UDP + update sessions (non-blocking).
-  void tick();
+  // Returns number of UDP packets handled this call (0 => idle).
+  int tick();
 
   void sendRaw(std::string_view data, const Endpoint& to);
+  // Cached-address send (skip inet_pton)
+  void sendRawTo(std::string_view data, const sockaddr_in& dst);
   void markSessionClosed(const Endpoint& ep, std::string_view reason);
   void removeSession(const Endpoint& ep, std::string_view reason);
 

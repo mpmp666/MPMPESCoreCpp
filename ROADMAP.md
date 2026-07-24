@@ -48,7 +48,7 @@ Port of `~/MPMPESCore` (Genisys / PocketMine, MCPE **0.14.x**, protocol **70**) 
 - [x] `server.properties` + CLI
 - [x] PluginManager: native `.so` + process JSON-line
 - [x] Events: server_start, session_*, player_login/join/quit, chat, command, move, block, world_load
-- [x] Examples: HelloC/Cpp/Python/Node/Go/PHP/Rust scaffolds
+- [x] Examples: HelloC/Cpp/Python only (PHP/Node/Go/Rust removed)
 
 ## Phase 2.6 — Map gen + multi-world ✅ (v0.3)
 

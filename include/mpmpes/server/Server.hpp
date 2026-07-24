@@ -78,6 +78,9 @@ private:
   // Teleport player between overworld <-> nether (or /goto style world switch)
   void changePlayerWorld(player::Player& p, level::Level* target, float x, float y, float z,
                          bool from_portal = false);
+  // Client-only sky/atmosphere dim (any wire value; no whitelist). Keeps world/pos.
+  // reset_to_level=true clears /dim override and restores level protocol dim.
+  void applyPlayerVisualDim(player::Player& p, std::uint8_t dim, bool reset_to_level = false);
   void tickPlayerPortals();
   // Survival: fall / fire / lava; respawn after death
   // Returns true if damage was applied (not blocked by creative / i-frames / already dead)

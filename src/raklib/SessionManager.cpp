@@ -34,6 +34,10 @@ void SessionManager::sendRaw(std::string_view data, const Endpoint& to) {
   socket_.writePacket(data, to);
 }
 
+void SessionManager::sendRawTo(std::string_view data, const sockaddr_in& dst) {
+  socket_.writePacketTo(data, dst);
+}
+
 void SessionManager::markSessionClosed(const Endpoint& ep, std::string_view reason) {
   Logger::instance().info("Session closing ", keyOf(ep), " reason=", reason);
   // actual erase happens in tick() after update — avoids use-after-free
@@ -64,13 +68,23 @@ Session& SessionManager::getOrCreateSession(const Endpoint& ep) {
   return *raw;
 }
 
-void SessionManager::tick() {
+int SessionManager::tick() {
   std::string buffer;
   Endpoint from;
-  for (int i = 0; i < 5000; ++i) {
+  int handled = 0;
+  // Drain more aggressively under load (was 5000).
+  for (int i = 0; i < 10000; ++i) {
     if (socket_.readPacket(buffer, from) == 0) break;
     if (buffer.empty()) continue;
     handlePacket(buffer, from);
+    ++handled;
+  }
+
+  // Immediate ACK/NACK after inbound burst — don't wait for full session update cadence.
+  if (handled > 0) {
+    for (auto& [_, s] : sessions_) {
+      if (s && !s->closed()) s->flushAcks();
+    }
   }
 
   const double t = now();
@@ -92,6 +106,7 @@ void SessionManager::tick() {
       ++it;
     }
   }
+  return handled;
 }
 
 void SessionManager::handlePacket(const std::string& buffer, const Endpoint& from) {

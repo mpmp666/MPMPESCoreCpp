@@ -309,6 +309,19 @@ void PlayerManager::sendChunksAround(Player& p, int radius_override) {
 }
 
 void PlayerManager::sendInventory(Player& p) {
+  // Keep inv/armor size + slots clean — garbage ids/counts crash PE Win when opening E UI.
+  if (p.inventory.size() < 36) p.inventory.resize(36, item::ItemStack::air());
+  if (p.inventory.size() > 36) p.inventory.resize(36);
+  for (auto& s : p.inventory) s = item::sanitizeSlot(s);
+  if (p.armor.size() < 4) p.armor.resize(4, item::ItemStack::air());
+  if (p.armor.size() > 4) p.armor.resize(4);
+  for (auto& s : p.armor) s = item::sanitizeSlot(s);
+  for (int i = 0; i < 9; ++i) {
+    int& link = p.hotbar_link[static_cast<std::size_t>(i)];
+    if (link < -1 || link >= static_cast<int>(p.inventory.size())) link = i; // 0-8 default
+  }
+  if (p.selected_hotbar < 0 || p.selected_hotbar > 8) p.selected_hotbar = 0;
+
   // PM PlayerInventory::sendContents: hotbar[i] = invIndex + 9 (or -1)
   auto hotbar = p.wireHotbar();
   sendPacket(p,
@@ -318,12 +331,22 @@ void PlayerManager::sendInventory(Player& p) {
 }
 
 void PlayerManager::sendCreativeContents(Player& p) {
-  auto items = item::creativeItems();
+  auto raw = item::creativeItems();
+  // Drop only true air — keep SPAWN_EGG (restored). Never pad with empty slots.
+  std::vector<item::ItemStack> items;
+  items.reserve(raw.size());
+  for (auto s : raw) {
+    s = item::sanitizeSlot(s);
+    if (s.empty()) continue;
+    items.push_back(s);
+  }
   sendPacket(p, protocol::encodeContainerSetContent(protocol::WINDOW_CREATIVE, items), true);
 }
 
 void PlayerManager::sendCraftingData(Player& p) {
-  sendPacket(p, protocol::encodeCraftingDataBasic(true), true);
+  // Empty CraftingData: PE 0.14 Windows crashes on open-inventory if recipe table is bad.
+  sendPacket(p, protocol::encodeCraftingDataBasic(/*clean=*/true, /*include_stub_recipes=*/false),
+             true);
 }
 
 void PlayerManager::sendPlayerListTo(Player& p) {
@@ -455,8 +478,9 @@ void PlayerManager::doLoginSequence(Player& p) {
   sendPacket(p, protocol::encodeAdventureSettings(flags), true);
 
   sendCraftingData(p);
-  sendInventory(p);
+  // PM setGamemode: creative palette before inventory contents
   if (p.gamemode == 1) sendCreativeContents(p);
+  sendInventory(p);
 
   // Full list for joiner (includes self once we mark spawned below)
   // Send list with self first so pause menu is not empty even solo

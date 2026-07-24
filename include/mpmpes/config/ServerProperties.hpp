@@ -22,7 +22,7 @@ struct PluginManifest {
   std::string name;
   std::string version = "0.1.0";
   std::string main; // path to .so / binary / script relative to plugin dir
-  std::string language = "native"; // native|go|c|cpp|python|php|nodejs|rust
+  std::string language = "native"; // native|c|cpp|python only
   std::string api = "1.0.0";
   std::string description;
   std::string author;

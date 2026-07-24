@@ -63,7 +63,7 @@ inline std::string encodeSetTime(std::int32_t time, bool started = true) {
 }
 
 // PE 0.14 ChangeDimension: dimension byte + unknown byte (PM puts 0).
-// Only DIMENSION_OVERWORLD (0) and DIMENSION_NETHER (1) are valid on the wire.
+// Pass dimension as-is (0/1 common; other values allowed for client experiments).
 inline std::string encodeChangeDimension(std::uint8_t dimension) {
   binary::BinaryStream out;
   out.putByte(CHANGE_DIMENSION_PACKET);
@@ -686,11 +686,26 @@ inline ContainerSetSlotDecoded decodeContainerSetSlot(std::string_view buffer) {
   return d;
 }
 
-// CraftingData with a few shaped recipes (planks, sticks, crafting table, torch)
-inline std::string encodeCraftingDataBasic(bool clean = true) {
+// CraftingData (0xba).
+// PE 0.14 Windows client is very brittle about recipe blobs when opening inventory (E):
+// a non-empty / slightly-wrong shaped grid has historically crashed Win32 0.14.x.
+// Default path: empty recipe list + clean=1 (keep client alive). CraftingEvent is still
+// accepted server-side for client-driven crafts; fill recipes later only after Win smoke.
+// Set include_stub_recipes=true to emit a tiny shaped set (Android-only experiments).
+inline std::string encodeCraftingDataBasic(bool clean = true, bool include_stub_recipes = false) {
   using item::ItemStack;
   namespace ids = item::ids;
 
+  binary::BinaryStream out;
+  out.putByte(CRAFTING_DATA_PACKET);
+
+  if (!include_stub_recipes) {
+    out.putInt(0); // recipe count
+    out.putByte(clean ? 1 : 0);
+    return out.buffer();
+  }
+
+  // --- optional stub recipes (disabled by default; Win PE crash risk) ---
   auto write_shaped = [](binary::BinaryStream& entry, int width, int height,
                          const std::vector<ItemStack>& grid, const ItemStack& result,
                          const std::array<std::uint8_t, 16>& uuid) {
@@ -720,8 +735,6 @@ inline std::string encodeCraftingDataBasic(bool clean = true) {
     entry.put(std::string_view(reinterpret_cast<const char*>(uuid.data()), 16));
   };
 
-  // v0.4.14: furnace feature removed — no ENTRY_FURNACE / ENTRY_FURNACE_DATA recipes.
-
   struct RecipeBlob {
     std::int32_t type;
     std::string data;
@@ -744,37 +757,17 @@ inline std::string encodeCraftingDataBasic(bool clean = true) {
     recipes.push_back({CRAFT_ENTRY_SHAPELESS, e.buffer()});
   };
 
-  // 1 log -> 4 planks
   add_shaped(1, 1, {ItemStack::of(ids::LOG)}, ItemStack::of(ids::PLANKS, 4), 1);
-  // 2 planks vertical -> 4 sticks
   add_shaped(1, 2, {ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS)},
              ItemStack::of(ids::STICK, 4), 2);
-  // 4 planks -> crafting table
   add_shaped(2, 2,
              {ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS),
               ItemStack::of(ids::PLANKS)},
              ItemStack::of(ids::WORKBENCH), 3);
-  // coal + stick -> 4 torches
   add_shaped(1, 2, {ItemStack::of(ids::COAL), ItemStack::of(ids::STICK)},
              ItemStack::of(ids::TORCH, 4), 4);
-  // wooden pickaxe
-  add_shaped(3, 3,
-             {ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS),
-              ItemStack::air(), ItemStack::of(ids::STICK), ItemStack::air(), ItemStack::air(),
-              ItemStack::of(ids::STICK), ItemStack::air()},
-             ItemStack::of(ids::WOODEN_PICKAXE), 5);
-  // chest
-  add_shaped(3, 3,
-             {ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS),
-              ItemStack::of(ids::PLANKS), ItemStack::air(), ItemStack::of(ids::PLANKS),
-              ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS), ItemStack::of(ids::PLANKS)},
-             ItemStack::of(ids::CHEST), 6);
-  // shapeless: 1 sugarcane -> sugar
   add_shapeless({ItemStack::of(ids::SUGARCANE)}, ItemStack::of(ids::SUGAR), 7);
-  // no furnace block craft recipe / no smelt recipes (furnace removed)
 
-  binary::BinaryStream out;
-  out.putByte(CRAFTING_DATA_PACKET);
   out.putInt(static_cast<std::int32_t>(recipes.size()));
   for (const auto& r : recipes) {
     out.putInt(r.type);

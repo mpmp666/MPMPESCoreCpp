@@ -16,7 +16,7 @@ void printUsage(const char* argv0) {
       << "Usage: " << argv0
       << " [--config PATH] [--port PORT] [--bind ADDR] [--motd TEXT]\n"
       << "       [--max-players N] [--plugins-dir DIR] [--no-plugins]\n"
-      << "  MPMPESCoreCpp — C++ rewrite (RakLib session + multi-lang plugins)\n";
+      << "  MPMPESCoreCpp — C++ rewrite (RakLib session + C/C++/Python plugins)\n";
 }
 
 } // namespace
