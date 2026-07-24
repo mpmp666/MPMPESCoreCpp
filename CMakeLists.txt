@@ -40,6 +40,11 @@ if(MSVC)
   target_compile_options(mpmpes PRIVATE /W4)
 else()
   target_compile_options(mpmpes PRIVATE -Wall -Wextra -Wpedantic)
+  # RISC-V needs libatomic for sub-word atomics. Link AFTER objects via
+  # target_link_libraries (CMAKE_EXE_LINKER_FLAGS puts -latomic too early).
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(mpmpes PRIVATE atomic)
+  endif()
 endif()
 
 if(WIN32)

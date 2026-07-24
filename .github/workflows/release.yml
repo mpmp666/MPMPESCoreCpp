@@ -89,8 +89,8 @@ jobs:
             host: riscv64-linux-gnu
             packages: g++-riscv64-linux-gnu gcc-riscv64-linux-gnu
             system_processor: riscv64
-            # 1-byte atomics need libatomic on riscv
-            ldflags: "-latomic"
+            # atomics handled in CMakeLists (target_link_libraries atomic)
+            ldflags: ""
 
           # Windows (MSVC) needs Winsock/dlfcn port — not yet supported.
           # Use WSL / Linux binary on Windows for now.
