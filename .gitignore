@@ -1,0 +1,50 @@
+# Build
+/build/
+/cmake-build-*/
+/out/
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Runtime / local server data (do not ship)
+/players/
+/worlds/
+/bans.txt
+/ops.txt
+/server.properties
+*.log
+/tmp/
+
+# Plugin build artifacts (keep sources + plugin.yml)
+plugins/**/lib*.so
+plugins/**/lib*.dylib
+plugins/**/lib*.dll
+plugins/HelloGo/hello_go
+plugins/HelloRust/hello_rust
+plugins/HelloRust/target/
+plugins/**/__pycache__/
+plugins/**/*.pyc
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.cache/
+
+# Archives / dumps
+*.zip
+*.tar
+*.tar.gz
+*.7z

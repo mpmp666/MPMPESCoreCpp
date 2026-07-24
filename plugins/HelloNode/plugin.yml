@@ -1,0 +1,7 @@
+name: HelloNode
+version: 0.1.0
+api: 1.0.0
+language: nodejs
+main: main.js
+author: mpmpes
+description: Example Node.js process plugin

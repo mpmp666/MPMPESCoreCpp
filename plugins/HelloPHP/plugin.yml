@@ -1,0 +1,7 @@
+name: HelloPHP
+version: 0.1.0
+api: 1.0.0
+language: php
+main: main.php
+author: mpmpes
+description: Example PHP process plugin

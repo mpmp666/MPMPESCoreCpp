@@ -1,0 +1,18 @@
+# MPMPESCoreCpp properties (copy to server.properties)
+motd=MPMPESCoreCpp
+server-port=19132
+server-ip=0.0.0.0
+max-players=20
+level-name=world
+level-type=flat
+# Default gamemode for NEW players: 0=survival 1=creative (also: survival/creative)
+# Returning players keep mode from players/<name>.dat; use /gm in-game to switch
+gamemode=1
+plugins-dir=plugins
+enable-plugins=on
+# zlib level 0-9 for outbound Batch packets (higher = more CPU, less bandwidth)
+network-compression-level=7
+# Batch when bare packet size >= N KB (-1=off, 0=always)
+network-batch-threshold-kb=1
+always-drop-on-break=off
+autosave=300

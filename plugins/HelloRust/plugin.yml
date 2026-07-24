@@ -1,0 +1,7 @@
+name: HelloRust
+version: 0.1.0
+api: 1.0.0
+language: rust
+main: hello_rust
+author: mpmpes
+description: Example Rust process plugin (cargo build --release && copy binary)

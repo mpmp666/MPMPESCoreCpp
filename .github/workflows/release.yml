@@ -1,0 +1,327 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/upload (e.g. v0.4.22). Empty = build only artifacts."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CMAKE_BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Linux native (GitHub-hosted) ---
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            artifact: mpmpes-linux-x86_64
+            cmake_args: ""
+            cross: none
+
+          - name: linux-x86_64-static
+            os: ubuntu-22.04
+            artifact: mpmpes-linux-x86_64-static
+            cmake_args: "-DCMAKE_EXE_LINKER_FLAGS=-static -DZLIB_USE_STATIC_LIBS=ON"
+            cross: static-try
+
+          # --- Linux ARM64 native ---
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm
+            artifact: mpmpes-linux-aarch64
+            cmake_args: ""
+            cross: none
+
+          # --- Linux cross (qemu user + multiarch) ---
+          - name: linux-armv7
+            os: ubuntu-22.04
+            artifact: mpmpes-linux-armv7
+            cmake_args: ""
+            cross: armv7
+
+          - name: linux-s390x
+            os: ubuntu-22.04
+            artifact: mpmpes-linux-s390x
+            cmake_args: ""
+            cross: s390x
+
+          - name: linux-ppc64le
+            os: ubuntu-22.04
+            artifact: mpmpes-linux-ppc64le
+            cmake_args: ""
+            cross: ppc64le
+
+          - name: linux-riscv64
+            os: ubuntu-22.04
+            artifact: mpmpes-linux-riscv64
+            cmake_args: ""
+            cross: riscv64
+
+          # --- Windows ---
+          - name: windows-x86_64
+            os: windows-2022
+            artifact: mpmpes-windows-x86_64
+            cmake_args: ""
+            cross: none
+
+          # --- macOS ---
+          - name: macos-x86_64
+            os: macos-13
+            artifact: mpmpes-macos-x86_64
+            cmake_args: ""
+            cross: none
+
+          - name: macos-arm64
+            os: macos-14
+            artifact: mpmpes-macos-arm64
+            cmake_args: ""
+            cross: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config zlib1g-dev \
+            file
+
+      - name: Setup cross toolchain (Linux foreign arch)
+        if: runner.os == 'Linux' && matrix.cross != 'none' && matrix.cross != 'static-try'
+        run: |
+          set -euo pipefail
+          case "${{ matrix.cross }}" in
+            armv7)
+              sudo dpkg --add-architecture armhf
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                g++-arm-linux-gnueabihf gcc-arm-linux-gnueabihf \
+                zlib1g-dev:armhf
+              echo "CC=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+              echo "CXX=arm-linux-gnueabihf-g++" >> "$GITHUB_ENV"
+              echo "CMAKE_EXTRA=-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=arm -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -DCMAKE_FIND_ROOT_PATH=/usr/arm-linux-gnueabihf" >> "$GITHUB_ENV"
+              ;;
+            s390x)
+              sudo dpkg --add-architecture s390x
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                g++-s390x-linux-gnu gcc-s390x-linux-gnu \
+                zlib1g-dev:s390x
+              echo "CC=s390x-linux-gnu-gcc" >> "$GITHUB_ENV"
+              echo "CXX=s390x-linux-gnu-g++" >> "$GITHUB_ENV"
+              echo "CMAKE_EXTRA=-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=s390x -DCMAKE_C_COMPILER=s390x-linux-gnu-gcc -DCMAKE_CXX_COMPILER=s390x-linux-gnu-g++ -DCMAKE_FIND_ROOT_PATH=/usr/s390x-linux-gnu" >> "$GITHUB_ENV"
+              ;;
+            ppc64le)
+              sudo dpkg --add-architecture ppc64el
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                g++-powerpc64le-linux-gnu gcc-powerpc64le-linux-gnu \
+                zlib1g-dev:ppc64el
+              echo "CC=powerpc64le-linux-gnu-gcc" >> "$GITHUB_ENV"
+              echo "CXX=powerpc64le-linux-gnu-g++" >> "$GITHUB_ENV"
+              echo "CMAKE_EXTRA=-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=ppc64le -DCMAKE_C_COMPILER=powerpc64le-linux-gnu-gcc -DCMAKE_CXX_COMPILER=powerpc64le-linux-gnu-g++ -DCMAKE_FIND_ROOT_PATH=/usr/powerpc64le-linux-gnu" >> "$GITHUB_ENV"
+              ;;
+            riscv64)
+              sudo dpkg --add-architecture riscv64
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                g++-riscv64-linux-gnu gcc-riscv64-linux-gnu \
+                zlib1g-dev:riscv64
+              echo "CC=riscv64-linux-gnu-gcc" >> "$GITHUB_ENV"
+              echo "CXX=riscv64-linux-gnu-g++" >> "$GITHUB_ENV"
+              echo "CMAKE_EXTRA=-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=riscv64 -DCMAKE_C_COMPILER=riscv64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=riscv64-linux-gnu-g++ -DCMAKE_FIND_ROOT_PATH=/usr/riscv64-linux-gnu" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unknown cross=${{ matrix.cross }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake ninja || true
+
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXTRA="${CMAKE_EXTRA:-}"
+          # Optional static link attempt (best-effort; may fall back dynamic)
+          if [ "${{ matrix.cross }}" = "static-try" ]; then
+            EXTRA="${{ matrix.cmake_args }} ${EXTRA}"
+          else
+            EXTRA="${{ matrix.cmake_args }} ${EXTRA}"
+          fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DMPMPES_BUILD_EXAMPLE_NATIVE=OFF \
+            ${EXTRA}
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          file build/mpmpes || true
+          ls -la build/mpmpes
+
+      - name: Configure & Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMPMPES_BUILD_EXAMPLE_NATIVE=OFF
+          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+          Get-ChildItem -Recurse build -Filter mpmpes.exe | Select-Object FullName,Length
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ART="${{ matrix.artifact }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN=$(find build -name 'mpmpes.exe' | head -n1)
+            cp "$BIN" "dist/${ART}.exe"
+            # optional PDB
+            PDB=$(find build -name 'mpmpes.pdb' 2>/dev/null | head -n1 || true)
+            [ -n "${PDB:-}" ] && cp "$PDB" "dist/${ART}.pdb" || true
+            (
+              cd dist
+              7z a -tzip "${ART}.zip" "${ART}.exe" >/dev/null
+            )
+          else
+            cp build/mpmpes "dist/${ART}"
+            chmod +x "dist/${ART}"
+            # strip if available (skip for static-try failures)
+            if command -v "${STRIP:-strip}" >/dev/null 2>&1; then
+              case "${{ matrix.cross }}" in
+                armv7) STRIP_BIN=arm-linux-gnueabihf-strip ;;
+                s390x) STRIP_BIN=s390x-linux-gnu-strip ;;
+                ppc64le) STRIP_BIN=powerpc64le-linux-gnu-strip ;;
+                riscv64) STRIP_BIN=riscv64-linux-gnu-strip ;;
+                *) STRIP_BIN=strip ;;
+              esac
+              "$STRIP_BIN" "dist/${ART}" || true
+            fi
+            tar -C dist -czf "dist/${ART}.tar.gz" "${ART}"
+            # keep bare binary too for convenience
+            (cd dist && sha256sum "${ART}" "${ART}.tar.gz" > "${ART}.sha256")
+          fi
+          ls -la dist/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' -o -name 'mpmpes-*' \) -print
+          # Prefer archives; also include bare binaries if no archive for that matrix
+          while IFS= read -r f; do
+            cp -v "$f" release-assets/
+          done < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \))
+          # bare binaries without matching archive
+          while IFS= read -r f; do
+            base=$(basename "$f")
+            case "$base" in
+              *.tar.gz|*.zip|*.sha256|*.pdb|*.exe) continue ;;
+            esac
+            # skip if we already have archive named similarly
+            if [ ! -f "release-assets/${base}.tar.gz" ] && [ ! -f "release-assets/${base}.zip" ]; then
+              cp -v "$f" release-assets/
+            fi
+          done < <(find artifacts -type f -name 'mpmpes-*')
+          ls -la release-assets/
+          (cd release-assets && sha256sum * > SHA256SUMS.txt || true)
+          cat release-assets/SHA256SUMS.txt || true
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: MPMPESCoreCpp ${{ steps.tag.outputs.name }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.name, 'rc') || contains(steps.tag.outputs.name, 'beta') || contains(steps.tag.outputs.name, 'alpha') }}
+          generate_release_notes: true
+          body: |
+            ## MPMPESCoreCpp ${{ steps.tag.outputs.name }}
+
+            Minecraft: PE **0.14.x** (protocol 70) C++ server core.
+
+            ### Binaries
+            | Asset | Platform |
+            |-------|----------|
+            | `mpmpes-linux-x86_64.tar.gz` | Linux x86_64 (glibc) |
+            | `mpmpes-linux-x86_64-static.tar.gz` | Linux x86_64 static (if link succeeded) |
+            | `mpmpes-linux-aarch64.tar.gz` | Linux ARM64 |
+            | `mpmpes-linux-armv7.tar.gz` | Linux ARMv7 (hard-float) |
+            | `mpmpes-linux-s390x.tar.gz` | Linux s390x (IBM Z) |
+            | `mpmpes-linux-ppc64le.tar.gz` | Linux POWER little-endian |
+            | `mpmpes-linux-riscv64.tar.gz` | Linux RISC-V 64 |
+            | `mpmpes-windows-x86_64.zip` | Windows x64 |
+            | `mpmpes-macos-x86_64.tar.gz` | macOS Intel |
+            | `mpmpes-macos-arm64.tar.gz` | macOS Apple Silicon |
+
+            Run:
+            ```bash
+            tar -xzf mpmpes-linux-*.tar.gz
+            chmod +x mpmpes-linux-*
+            ./mpmpes-linux-x86_64 --port 19132
+            ```
+
+            First run creates `server.properties` if missing.
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

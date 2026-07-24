@@ -1,0 +1,7 @@
+name: HelloCpp
+version: 0.1.0
+api: 1.0.0
+language: cpp
+main: libhello_cpp.so
+author: mpmpes
+description: Example C++ native plugin (.so)

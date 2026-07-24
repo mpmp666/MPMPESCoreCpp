@@ -1,0 +1,7 @@
+name: HelloC
+version: 0.1.0
+api: 1.0.0
+language: c
+main: libhello_c.so
+author: mpmpes
+description: Example native C plugin (shared library)

@@ -1,0 +1,7 @@
+# name:generator:seed
+# generators: flat | void | normal | nether | end
+# End world folder/name: ender (PM parity). PE wire dim is always 0/1 only.
+# Note: already-saved chunks under worlds/<name>/chunks keep old terrain until deleted
+zc:flat:0
+nether:nether:1
+ender:end:2

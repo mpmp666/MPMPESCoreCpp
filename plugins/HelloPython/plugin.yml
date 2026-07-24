@@ -1,0 +1,7 @@
+name: HelloPython
+version: 0.1.0
+api: 1.0.0
+language: python
+main: main.py
+author: mpmpes
+description: Example Python process plugin (JSON line protocol)
