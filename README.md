@@ -6,7 +6,7 @@
 - 来源：`~/MPMPESCore`（Genisys / PocketMine-MP 分支）
 - 许可：与上游一致，LGPL-3.0（衍生）
 
-## 状态（v0.4 — dig/place + 创造 + 合成 + 生物 AI + 铁轨/红石）
+## 状态（v0.5 — dig/place + 创造 + 合成 + 生物 AI + 铁轨/红石 + 漏斗/矿车容器）
 
 已实现：
 
@@ -60,7 +60,7 @@ cmake --build build -j"$(nproc)"
 
 ```bash
 # 示例：本机发版
-git tag v0.4.24 && git push origin v0.4.24
+git tag v0.5.0 && git push origin v0.5.0
 # 或 Actions → Build & Release → Run workflow
 ```
 

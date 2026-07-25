@@ -2185,7 +2185,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
   }
 
   if (cmd == "ver" || cmd == "version") {
-    reply(std::string("MPMPESCoreCpp 0.4.24 (plugins-c-py-perf) | MCPE ") + cfg_.version_name +
+    reply(std::string("MPMPESCoreCpp 0.5.0 (hopper-rails-redstone) | MCPE ") + cfg_.version_name +
           " protocol " + std::to_string(cfg_.protocol));
     return;
   }
@@ -4166,7 +4166,7 @@ void Server::tickAutosave() {
 
 void Server::start() {
   auto& log = util::Logger::instance();
-  log.notice("MPMPESCoreCpp ", "0.4.24", " (plugins-c-py-perf)");
+  log.notice("MPMPESCoreCpp ", "0.5.0", " (hopper-rails-redstone)");
   log.info("Target protocol ", cfg_.protocol, " (MCPE ", cfg_.version_name, ")");
   log.info("Binding UDP ", cfg_.bind, ":", cfg_.port);
   log.info("Batch: compression-level=", cfg_.network_compression_level,
