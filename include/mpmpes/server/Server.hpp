@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mpmpes/block/Redstone.hpp"
 #include "mpmpes/entity/Entity.hpp"
 #include "mpmpes/level/Level.hpp"
 #include "mpmpes/player/Player.hpp"
@@ -18,6 +19,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace mpmpes::server {
 
@@ -35,7 +37,20 @@ public:
   level::LevelManager& levels() { return levels_; }
   entity::EntityManager& entities() { return entities_; }
 
+  // Plugin host helpers (PluginHostAccess bridge; safe no-ops if not running)
+  void pluginHostBroadcast(const char* msg);
+  int pluginHostSendMessage(const char* username, const char* msg);
+  int pluginHostPlayerCount();
+  int pluginHostGetPlayerPos(const char* username, float* x, float* y, float* z, char* world_out,
+                             int world_out_len);
+  int pluginHostSetBlock(const char* world, int x, int y, int z, int id, int meta);
+  int pluginHostGetBlock(const char* world, int x, int y, int z);
+  int pluginHostSetSignText(const char* world, int x, int y, int z, const char* t1, const char* t2,
+                            const char* t3, const char* t4);
+  int pluginHostKickPlayer(const char* username, const char* reason);
+
 private:
+  void installPluginHostAccess();
   std::string buildRaklibName() const;
   void handleMcpePayload(const raklib::Endpoint& ep, const raklib::EncapsulatedPacket& pk);
   // buffer is bare MCPE packet starting with pid (0x8f...), no 0x8e prefix
@@ -44,6 +59,7 @@ private:
   void handleLogin(player::Player& p, std::string_view buffer);
   void handleText(player::Player& p, std::string_view buffer);
   void handleMove(player::Player& p, std::string_view buffer);
+  void handlePlayerInput(player::Player& p, std::string_view buffer);
   void handleChunkRadius(player::Player& p, std::string_view buffer);
   void handlePlayerAction(player::Player& p, std::string_view buffer);
   void handleRemoveBlock(player::Player& p, std::string_view buffer);
@@ -54,6 +70,7 @@ private:
   void handleInteract(player::Player& p, std::string_view buffer);
   void handleAnimate(player::Player& p, std::string_view buffer);
   void handleDropItem(player::Player& p, std::string_view buffer);
+  void handleBlockEntityData(player::Player& p, std::string_view buffer);
   void handleBuiltinCommand(player::Player& p, std::string_view cmd, std::string_view args);
 
   // Unified command dispatch (player or console). reply() delivers feedback.
@@ -102,8 +119,21 @@ private:
   void tickEntities();
   void tickItemPickups();
   void tickFurnaces();
+  void tickHoppers();
+  // After hopper/minecart transfer: push ContainerSetContent to anyone viewing that block/entity.
+  void resyncOpenContainerAt(level::Level* level, int x, int y, int z);
+  void resyncOpenEntityContainer(std::int64_t eid);
+  void tickRedstoneSchedules();
   void tickAutosave();
   void saveEverything(bool force_chunks = false);
+  // Broadcast redstone recompute around a block; also used after lever/torch place
+  void recomputeAndBroadcastRedstone(level::Level* level, int x, int y, int z, int radius = 16);
+  // Queue delayed diode flips (Genisys scheduleUpdate); same pos/id replaces delay
+  void enqueueRedstoneSchedule(level::Level* level, const block::RedstoneSchedule& s);
+  // Minecart link packets (SetEntityLink) to nearby players
+  void broadcastEntityLink(level::Level* level, std::int64_t from, std::int64_t to,
+                           std::uint8_t type, player::Player* rider = nullptr);
+  void dismountPlayer(player::Player& p);
 
   // Drop / throw: spawn world item entity with motion
   entity::Entity* dropItemInWorld(level::Level* level, float x, float y, float z,
@@ -112,13 +142,18 @@ private:
   // Player Q / ACTION_DROP: remove from inv and throw along look vector
   bool playerThrowHeld(player::Player& p, item::ItemStack stack, bool full_stack);
 
-  // Container windows (chest type 0 / furnace type 2)
+  // Container windows (chest type 0 / furnace type 2 / hopper type 8)
   void openChest(player::Player& p, int x, int y, int z);
   void openFurnace(player::Player& p, int x, int y, int z);
+  void openHopper(player::Player& p, int x, int y, int z);
+  // Chest/hopper minecart inventory (entity-linked ContainerOpen)
+  void openMinecartContainer(player::Player& p, entity::Entity& e);
   void closeContainer(player::Player& p, bool send_close_pk = true);
   void closeChest(player::Player& p, bool send_close_pk = true) { closeContainer(p, send_close_pk); }
   void handleContainerClose(player::Player& p, std::string_view buffer);
   void broadcastChestLid(level::Level* level, int x, int y, int z, bool open);
+  // Force-close any player viewing this entity container (cart removed / out of reach)
+  void closeViewersOfEntity(std::int64_t eid);
 
   void networkThreadMain();
 
@@ -147,6 +182,13 @@ private:
   std::mutex console_mu_;
   std::queue<std::string> console_queue_;
   bool console_thread_started_ = false;
+
+  // PE/Genisys delayed redstone (repeaters): decremented each server tick
+  struct PendingRedstone {
+    level::Level* level = nullptr;
+    block::RedstoneSchedule s;
+  };
+  std::vector<PendingRedstone> redstone_schedules_;
 };
 
 } // namespace mpmpes::server

@@ -119,6 +119,8 @@ inline constexpr std::uint8_t WINDOW_FIRST_DYNAMIC = 2;
 inline constexpr std::uint8_t CONTAINER_TYPE_CHEST = 0; // 27 slots
 inline constexpr std::uint8_t CONTAINER_TYPE_WORKBENCH = 1;
 inline constexpr std::uint8_t CONTAINER_TYPE_FURNACE = 2;
+// PE 0.14 InventoryType network typeId for hopper (5 slots)
+inline constexpr std::uint8_t CONTAINER_TYPE_HOPPER = 8;
 
 // CraftingData entry types
 inline constexpr std::int32_t CRAFT_ENTRY_SHAPELESS = 0;
@@ -153,6 +155,11 @@ inline constexpr std::int32_t ENTITY_CREEPER = 33;
 inline constexpr std::int32_t ENTITY_SKELETON = 34;
 inline constexpr std::int32_t ENTITY_SPIDER = 35;
 inline constexpr std::int32_t ENTITY_ITEM = 64;
+inline constexpr std::int32_t ENTITY_MINECART = 84;
+// PE 0.14 / Genisys special minecarts
+inline constexpr std::int32_t ENTITY_MINECART_HOPPER = 96;
+inline constexpr std::int32_t ENTITY_MINECART_TNT = 97;
+inline constexpr std::int32_t ENTITY_MINECART_CHEST = 98;
 
 // Entity metadata
 inline constexpr std::uint8_t DATA_TYPE_BYTE = 0;
@@ -192,10 +199,38 @@ inline constexpr std::uint8_t BLOCK_DIAMOND_ORE = 56;
 inline constexpr std::uint8_t BLOCK_WORKBENCH = 58;
 inline constexpr std::uint8_t BLOCK_FURNACE = 61;
 inline constexpr std::uint8_t BLOCK_BURNING_FURNACE = 62;
+inline constexpr std::uint8_t BLOCK_SIGN_POST = 63;
+inline constexpr std::uint8_t BLOCK_WALL_SIGN = 68;
 inline constexpr std::uint8_t BLOCK_NETHERRACK = 87;
 inline constexpr std::uint8_t BLOCK_GLOWSTONE = 89;
 inline constexpr std::uint8_t BLOCK_PORTAL = 90; // nether portal
 inline constexpr std::uint8_t BLOCK_END_STONE = 121;
+// Rails / redstone (PE 0.14 + Genisys subset)
+inline constexpr std::uint8_t BLOCK_POWERED_RAIL = 27;
+inline constexpr std::uint8_t BLOCK_DETECTOR_RAIL = 28;
+inline constexpr std::uint8_t BLOCK_REDSTONE_WIRE = 55;
+inline constexpr std::uint8_t BLOCK_RAIL = 66;
+inline constexpr std::uint8_t BLOCK_LEVER = 69;
+inline constexpr std::uint8_t BLOCK_STONE_PRESSURE_PLATE = 70;
+inline constexpr std::uint8_t BLOCK_WOODEN_PRESSURE_PLATE = 72;
+inline constexpr std::uint8_t BLOCK_UNLIT_REDSTONE_TORCH = 75;
+inline constexpr std::uint8_t BLOCK_REDSTONE_TORCH = 76;
+inline constexpr std::uint8_t BLOCK_STONE_BUTTON = 77;
+inline constexpr std::uint8_t BLOCK_UNPOWERED_REPEATER = 93;
+inline constexpr std::uint8_t BLOCK_POWERED_REPEATER = 94;
+inline constexpr std::uint8_t BLOCK_INACTIVE_REDSTONE_LAMP = 123;
+inline constexpr std::uint8_t BLOCK_ACTIVE_REDSTONE_LAMP = 124;
+inline constexpr std::uint8_t BLOCK_ACTIVATOR_RAIL = 126;
+inline constexpr std::uint8_t BLOCK_WOODEN_BUTTON = 143;
+inline constexpr std::uint8_t BLOCK_LIGHT_WEIGHTED_PRESSURE_PLATE = 147;
+inline constexpr std::uint8_t BLOCK_HEAVY_WEIGHTED_PRESSURE_PLATE = 148;
+// Comparator: PC/PE later ids; server supports for plugins / newer clients
+inline constexpr std::uint8_t BLOCK_UNPOWERED_COMPARATOR = 149;
+inline constexpr std::uint8_t BLOCK_POWERED_COMPARATOR = 150;
+inline constexpr std::uint8_t BLOCK_DAYLIGHT_SENSOR = 151;
+inline constexpr std::uint8_t BLOCK_REDSTONE_BLOCK = 152;
+// PE 0.14 hopper block (registerBlock HopperBlock in libminecraftpe)
+inline constexpr std::uint8_t BLOCK_HOPPER = 154;
 
 // Dimensions (StartGame / ChangeDimension)
 // PE 0.14 ChangeDimension only accepts NORMAL=0 and NETHER=1 (PM parity).
@@ -208,6 +243,13 @@ inline constexpr std::uint8_t DIMENSION_END_INTERNAL = 2;
 // EntityEvent event ids (PM EntityEventPacket)
 inline constexpr std::uint8_t ENTITY_EVENT_HURT = 2;
 inline constexpr std::uint8_t ENTITY_EVENT_DEATH = 3;
+
+// Standing sign rotation 0..15 (PM SignPost place: floor(((yaw+180)*16/360)+0.5)&0x0F)
+inline std::uint8_t signPostRotationMeta(float yaw) {
+  float v = ((yaw + 180.f) * 16.f / 360.f) + 0.5f;
+  int m = static_cast<int>(std::floor(v)) & 0x0F;
+  return static_cast<std::uint8_t>(m);
+}
 
 // Horizontal facing meta for chest/furnace (PM place faces[])
 // player getDirection: 0=S 1=W 2=N 3=E → meta 3,4,2,5

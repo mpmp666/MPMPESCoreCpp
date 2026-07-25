@@ -1,5 +1,6 @@
 #include "mpmpes/plugin/PluginManager.hpp"
 
+#include "mpmpes/plugin/PluginHostAccess.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <cerrno>
@@ -87,6 +88,8 @@ bool jsonGetBool(std::string_view json, std::string_view key) {
   return rest.starts_with("true") || rest.starts_with("1");
 }
 
+PluginHostAccess g_host_access{};
+
 void hostLogInfo(const char* msg) {
   Logger::instance().info("[plugin] ", msg ? msg : "");
 }
@@ -98,6 +101,39 @@ void hostLogError(const char* msg) {
 }
 void hostBroadcast(const char* msg) {
   Logger::instance().notice("[broadcast] ", msg ? msg : "");
+  if (g_host_access.broadcast && g_host_access.ctx) {
+    g_host_access.broadcast(g_host_access.ctx, msg);
+  }
+}
+int hostSendMessage(const char* username, const char* msg) {
+  if (!g_host_access.send_message || !g_host_access.ctx) return 0;
+  return g_host_access.send_message(g_host_access.ctx, username, msg);
+}
+int hostPlayerCount(void) {
+  if (!g_host_access.player_count || !g_host_access.ctx) return 0;
+  return g_host_access.player_count(g_host_access.ctx);
+}
+int hostGetPlayerPos(const char* username, float* x, float* y, float* z, char* world_out,
+                     int world_out_len) {
+  if (!g_host_access.get_player_pos || !g_host_access.ctx) return 0;
+  return g_host_access.get_player_pos(g_host_access.ctx, username, x, y, z, world_out, world_out_len);
+}
+int hostSetBlock(const char* world, int32_t x, int32_t y, int32_t z, int32_t id, int32_t meta) {
+  if (!g_host_access.set_block || !g_host_access.ctx) return 0;
+  return g_host_access.set_block(g_host_access.ctx, world, x, y, z, id, meta);
+}
+int hostGetBlock(const char* world, int32_t x, int32_t y, int32_t z) {
+  if (!g_host_access.get_block || !g_host_access.ctx) return -1;
+  return g_host_access.get_block(g_host_access.ctx, world, x, y, z);
+}
+int hostSetSignText(const char* world, int32_t x, int32_t y, int32_t z, const char* t1,
+                    const char* t2, const char* t3, const char* t4) {
+  if (!g_host_access.set_sign_text || !g_host_access.ctx) return 0;
+  return g_host_access.set_sign_text(g_host_access.ctx, world, x, y, z, t1, t2, t3, t4);
+}
+int hostKickPlayer(const char* username, const char* reason) {
+  if (!g_host_access.kick_player || !g_host_access.ctx) return 0;
+  return g_host_access.kick_player(g_host_access.ctx, username, reason);
 }
 
 MpmpesHostFns makeHostFns() {
@@ -107,8 +143,22 @@ MpmpesHostFns makeHostFns() {
   h.log_error = hostLogError;
   h.broadcast = hostBroadcast;
   h.user_data = nullptr;
+  h.send_message = hostSendMessage;
+  h.player_count = hostPlayerCount;
+  h.get_player_pos = hostGetPlayerPos;
+  h.set_block = hostSetBlock;
+  h.get_block = hostGetBlock;
+  h.set_sign_text = hostSetSignText;
+  h.kick_player = hostKickPlayer;
   return h;
 }
+
+} // namespace (host helpers)
+
+void setPluginHostAccess(const PluginHostAccess& access) { g_host_access = access; }
+const PluginHostAccess& pluginHostAccess() { return g_host_access; }
+
+namespace {
 
 class NativePlugin : public IPlugin {
 public:
@@ -146,6 +196,8 @@ public:
     on_move_ = reinterpret_cast<void (*)(const MpmpesEventMove*)>(dlsym(handle_, "mpmpes_on_move"));
     on_block_ =
         reinterpret_cast<void (*)(const MpmpesEventBlock*)>(dlsym(handle_, "mpmpes_on_block"));
+    on_sign_ = reinterpret_cast<void (*)(MpmpesEventSignChange*)>(
+        dlsym(handle_, "mpmpes_on_sign_change"));
     on_world_ = reinterpret_cast<void (*)(const MpmpesEventWorldLoad*)>(
         dlsym(handle_, "mpmpes_on_world_load"));
     if (!info_fn || !init_fn) {
@@ -196,6 +248,7 @@ public:
     on_command_ = nullptr;
     on_move_ = nullptr;
     on_block_ = nullptr;
+    on_sign_ = nullptr;
     on_world_ = nullptr;
   }
 
@@ -253,6 +306,41 @@ public:
     MpmpesEventBlock e{ev.username.c_str(), ev.x, ev.y, ev.z, ev.action, ev.face};
     on_block_(&e);
   }
+  void onSignChange(SignChangeEvent& ev) override {
+    if (!on_sign_) return;
+    char l1[256]{}, l2[256]{}, l3[256]{}, l4[256]{};
+    auto copyIn = [](char* dst, std::size_t cap, const std::string& s) {
+      if (cap == 0) return;
+      const auto n = std::min(s.size(), cap - 1);
+      if (n) std::memcpy(dst, s.data(), n);
+      dst[n] = '\0';
+    };
+    copyIn(l1, sizeof(l1), ev.text1);
+    copyIn(l2, sizeof(l2), ev.text2);
+    copyIn(l3, sizeof(l3), ev.text3);
+    copyIn(l4, sizeof(l4), ev.text4);
+    MpmpesEventSignChange e{};
+    e.username = ev.username.c_str();
+    e.x = ev.x;
+    e.y = ev.y;
+    e.z = ev.z;
+    e.text1 = l1;
+    e.text2 = l2;
+    e.text3 = l3;
+    e.text4 = l4;
+    e.cancelled = ev.cancelled ? 1 : 0;
+    e.line1 = l1;
+    e.line2 = l2;
+    e.line3 = l3;
+    e.line4 = l4;
+    e.line_cap = 256;
+    on_sign_(&e);
+    if (e.cancelled) ev.cancelled = true;
+    if (e.line1) ev.text1 = e.line1;
+    if (e.line2) ev.text2 = e.line2;
+    if (e.line3) ev.text3 = e.line3;
+    if (e.line4) ev.text4 = e.line4;
+  }
   void onWorldLoad(const WorldLoadEvent& ev) override {
     if (!on_world_) return;
     MpmpesEventWorldLoad e{ev.name.c_str(), ev.generator, ev.seed};
@@ -275,6 +363,7 @@ private:
   void (*on_command_)(MpmpesEventCommand*) = nullptr;
   void (*on_move_)(const MpmpesEventMove*) = nullptr;
   void (*on_block_)(const MpmpesEventBlock*) = nullptr;
+  void (*on_sign_)(MpmpesEventSignChange*) = nullptr;
   void (*on_world_)(const MpmpesEventWorldLoad*) = nullptr;
 };
 
@@ -328,7 +417,7 @@ public:
     int flags = fcntl(rfd_, F_GETFL, 0);
     fcntl(rfd_, F_SETFL, flags | O_NONBLOCK);
 
-    if (!sendLine(R"({"op":"init","api":2})")) {
+    if (!sendLine(R"({"op":"init","api":3})")) {
       error = "failed to send init";
       disable();
       return false;
@@ -452,6 +541,28 @@ public:
                   R"(,"face":)" + std::to_string(ev.face) + "}",
               0);
   }
+  void onSignChange(SignChangeEvent& ev) override {
+    last_sign_cancel_ = false;
+    last_sign_t1_.clear();
+    last_sign_t2_.clear();
+    last_sign_t3_.clear();
+    last_sign_t4_.clear();
+    last_sign_rewrite_ = false;
+    emitEvent("sign_change",
+              std::string(R"({"username":")") + jsonEscape(ev.username) + R"(","x":)" +
+                  std::to_string(ev.x) + R"(,"y":)" + std::to_string(ev.y) + R"(,"z":)" +
+                  std::to_string(ev.z) + R"(,"text1":")" + jsonEscape(ev.text1) +
+                  R"(","text2":")" + jsonEscape(ev.text2) + R"(","text3":")" +
+                  jsonEscape(ev.text3) + R"(","text4":")" + jsonEscape(ev.text4) + "\"}",
+              80);
+    if (last_sign_cancel_) ev.cancelled = true;
+    if (last_sign_rewrite_) {
+      ev.text1 = last_sign_t1_;
+      ev.text2 = last_sign_t2_;
+      ev.text3 = last_sign_t3_;
+      ev.text4 = last_sign_t4_;
+    }
+  }
   void onWorldLoad(const WorldLoadEvent& ev) override {
     emitEvent("world_load",
               std::string(R"({"name":")") + jsonEscape(ev.name) + R"(","generator":)" +
@@ -566,6 +677,18 @@ private:
       last_cmd_handled_ = true;
       return;
     }
+    if (op == "cancel_sign" || (op == "result" && jsonGetBool(line, "sign_cancelled"))) {
+      last_sign_cancel_ = true;
+      return;
+    }
+    if (op == "rewrite_sign" || (op == "result" && jsonGetBool(line, "sign_rewrite"))) {
+      last_sign_rewrite_ = true;
+      last_sign_t1_ = jsonGetString(line, "text1");
+      last_sign_t2_ = jsonGetString(line, "text2");
+      last_sign_t3_ = jsonGetString(line, "text3");
+      last_sign_t4_ = jsonGetString(line, "text4");
+      return;
+    }
   }
 
   config::PluginManifest manifest_;
@@ -577,6 +700,9 @@ private:
   bool init_ok_ = false;
   bool init_err_ = false;
   std::string init_err_msg_;
+  bool last_sign_cancel_ = false;
+  bool last_sign_rewrite_ = false;
+  std::string last_sign_t1_, last_sign_t2_, last_sign_t3_, last_sign_t4_;
   bool last_chat_cancel_ = false;
   bool last_cmd_handled_ = false;
 };
@@ -708,6 +834,9 @@ void PluginManager::fireMove(const MoveEvent& ev) {
 }
 void PluginManager::fireBlock(const BlockEvent& ev) {
   for (auto& p : plugins_) p->onBlock(ev);
+}
+void PluginManager::fireSignChange(SignChangeEvent& ev) {
+  for (auto& p : plugins_) p->onSignChange(ev);
 }
 void PluginManager::fireWorldLoad(const WorldLoadEvent& ev) {
   for (auto& p : plugins_) p->onWorldLoad(ev);

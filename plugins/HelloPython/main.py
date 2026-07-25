@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MPMPES process plugin — newline JSON on stdin/stdout."""
+"""MPMPES process plugin — newline JSON on stdin/stdout. API v3."""
 import json
 import sys
 
@@ -24,7 +24,7 @@ def main():
             continue
         op = msg.get("op")
         if op == "init":
-            log("HelloPython: init OK")
+            log(f"HelloPython: init OK (api={msg.get('api')})")
             send({"op": "ok"})
         elif op == "shutdown":
             log("HelloPython: shutdown")
@@ -50,10 +50,18 @@ def main():
                 log(f"HelloPython: command /{data.get('command')} {data.get('args')}")
             elif name == "world_load":
                 log(f"HelloPython: world_load {data.get('name')} gen={data.get('generator')}")
+            elif name == "sign_change":
+                log(
+                    "HelloPython: sign_change "
+                    f"{data.get('username')} @ {data.get('x')},{data.get('y')},{data.get('z')} "
+                    f"|{data.get('text1')}|{data.get('text2')}|{data.get('text3')}|{data.get('text4')}|"
+                )
+                # Example: cancel empty first line rewrites are no-ops.
+                # To cancel: send({"op":"cancel_sign"})
+                # To rewrite: send({"op":"rewrite_sign","text1":"...","text2":"...","text3":"...","text4":"..."})
             elif name == "block":
                 pass  # high-freq dig/place — never log (spams console)
             else:
-                # skip high-freq noise
                 if name not in ("move",):
                     log(f"HelloPython: event {name}", level="info")
 

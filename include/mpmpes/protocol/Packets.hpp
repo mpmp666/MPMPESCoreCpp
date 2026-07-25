@@ -279,6 +279,16 @@ inline std::string encodeRemoveEntity(std::int64_t eid) {
   return out.buffer();
 }
 
+// SetEntityLink 0xaf — from, to, type (0 remove / 1 ride / 2 passenger; PM also uses 3)
+inline std::string encodeSetEntityLink(std::int64_t from, std::int64_t to, std::uint8_t type) {
+  binary::BinaryStream out;
+  out.putByte(SET_ENTITY_LINK_PACKET);
+  out.putLong(from);
+  out.putLong(to);
+  out.putByte(type);
+  return out.buffer();
+}
+
 // RemovePlayer 0x97 — PE Human despawn (eid + uuid)
 inline std::string encodeRemovePlayer(std::int64_t eid, const std::array<std::uint8_t, 16>& uuid) {
   binary::BinaryStream out;
@@ -612,6 +622,155 @@ inline std::string encodeChestSpawnNbt(std::int32_t x, std::int32_t y, std::int3
   });
 }
 
+// Hopper tile spawn compound (PE HopperBlockEntity)
+inline std::string encodeHopperSpawnNbt(std::int32_t x, std::int32_t y, std::int32_t z) {
+  return nbt_le::writeRootCompound([&](binary::BinaryStream& o) {
+    nbt_le::putStringTag(o, "id", "Hopper");
+    nbt_le::putIntTag(o, "x", x);
+    nbt_le::putIntTag(o, "y", y);
+    nbt_le::putIntTag(o, "z", z);
+  });
+}
+
+// Sign tile spawn compound (PM tile/Sign::getSpawnCompound) — Text1..Text4 only on wire
+inline std::string encodeSignSpawnNbt(std::int32_t x, std::int32_t y, std::int32_t z,
+                                      std::string_view text1, std::string_view text2,
+                                      std::string_view text3, std::string_view text4) {
+  return nbt_le::writeRootCompound([&](binary::BinaryStream& o) {
+    nbt_le::putStringTag(o, "id", "Sign");
+    nbt_le::putStringTag(o, "Text1", text1);
+    nbt_le::putStringTag(o, "Text2", text2);
+    nbt_le::putStringTag(o, "Text3", text3);
+    nbt_le::putStringTag(o, "Text4", text4);
+    nbt_le::putIntTag(o, "x", x);
+    nbt_le::putIntTag(o, "y", y);
+    nbt_le::putIntTag(o, "z", z);
+  });
+}
+
+// Minimal LE NBT reader for Sign BlockEntityData (id + Text1..4)
+struct DecodedSignNbt {
+  bool ok = false;
+  std::string id;
+  std::string text1, text2, text3, text4;
+};
+
+inline DecodedSignNbt decodeSignNbtLe(std::string_view nbt) {
+  DecodedSignNbt out;
+  try {
+    binary::BinaryStream in{std::string(nbt)};
+    auto skipPayload = [&](std::uint8_t type, auto& self) -> void {
+      switch (type) {
+        case 0: // End
+          return;
+        case 1: // Byte
+          in.getByte();
+          return;
+        case 2: // Short
+          in.getLShort();
+          return;
+        case 3: // Int
+          in.getLInt();
+          return;
+        case 4: // Long
+          in.getLLong();
+          return;
+        case 5: // Float
+          in.getLFloat();
+          return;
+        case 6: // Double
+          in.getLDouble();
+          return;
+        case 7: { // ByteArray
+          auto len = in.getLInt();
+          if (len > 0) in.get(static_cast<std::size_t>(len));
+          return;
+        }
+        case 8: { // String
+          auto len = in.getLShort();
+          if (len > 0) in.get(len);
+          return;
+        }
+        case 9: { // List
+          auto et = in.getByte();
+          auto n = in.getLInt();
+          for (std::int32_t i = 0; i < n; ++i) self(et, self);
+          return;
+        }
+        case 10: // Compound
+          for (;;) {
+            auto t = in.getByte();
+            if (t == 0) break;
+            auto nlen = in.getLShort();
+            if (nlen > 0) in.get(nlen);
+            self(t, self);
+          }
+          return;
+        case 11: { // IntArray
+          auto n = in.getLInt();
+          for (std::int32_t i = 0; i < n; ++i) in.getLInt();
+          return;
+        }
+        default:
+          throw binary::StreamError("unknown nbt type");
+      }
+    };
+    auto walkCompound = [&](auto& self_walk) -> void {
+      for (;;) {
+        auto t = in.getByte();
+        if (t == 0) break;
+        auto nlen = in.getLShort();
+        std::string name;
+        if (nlen > 0) name = in.get(nlen);
+        if (t == nbt_le::TAG_String) {
+          auto vlen = in.getLShort();
+          std::string val = vlen > 0 ? in.get(vlen) : std::string{};
+          if (name == "id") out.id = std::move(val);
+          else if (name == "Text1") out.text1 = std::move(val);
+          else if (name == "Text2") out.text2 = std::move(val);
+          else if (name == "Text3") out.text3 = std::move(val);
+          else if (name == "Text4") out.text4 = std::move(val);
+        } else if (t == nbt_le::TAG_Compound) {
+          self_walk(self_walk);
+        } else {
+          skipPayload(t, skipPayload);
+        }
+      }
+    };
+    // root compound (named or unnamed)
+    auto root_type = in.getByte();
+    if (root_type != nbt_le::TAG_Compound) return out;
+    auto root_name_len = in.getLShort();
+    if (root_name_len > 0) in.get(root_name_len);
+    walkCompound(walkCompound);
+    out.ok = (out.id == "Sign" || out.id.empty()); // empty id still try texts if present
+    if (!out.id.empty() && out.id != "Sign") out.ok = false;
+    else out.ok = true;
+  } catch (...) {
+    out.ok = false;
+  }
+  return out;
+}
+
+struct BlockEntityDataPacket {
+  std::int32_t x = 0, y = 0, z = 0;
+  std::string namedtag;
+};
+
+inline bool decodeBlockEntityData(std::string_view buffer, BlockEntityDataPacket& out) {
+  try {
+    binary::BinaryStream in{std::string(buffer)};
+    if (in.getByte() != BLOCK_ENTITY_DATA_PACKET) return false;
+    out.x = in.getInt();
+    out.y = in.getInt();
+    out.z = in.getInt();
+    out.namedtag = in.getRemaining();
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
 // Batch 0x92: [pid][int32 zlib_len][zlib_deflate(concat int32_len + packet...)]
 // payloads are bare DataPacket buffers (NO 0x8e inside).
 inline std::string encodeBatch(const std::string& zlib_payload) {
@@ -881,6 +1040,33 @@ inline MoveDecoded decodeMovePlayer(std::string_view buffer) {
     d.pitch = in.getFloat();
     d.mode = in.getByte();
     d.on_ground = in.getByte() > 0;
+    d.ok = true;
+  } catch (...) {
+    d.ok = false;
+  }
+  return d;
+}
+
+// PlayerInput 0xbe — vehicle controls (PM PlayerInputPacket)
+// motX = strafe, motY = forward (-1..1); flags: 0x80 jump, 0x40 sneak
+struct PlayerInputDecoded {
+  float mot_x = 0.f;
+  float mot_y = 0.f;
+  bool jumping = false;
+  bool sneaking = false;
+  bool ok = false;
+};
+
+inline PlayerInputDecoded decodePlayerInput(std::string_view buffer) {
+  PlayerInputDecoded d;
+  try {
+    binary::BinaryStream in{std::string(buffer)};
+    if (in.getByte() != PLAYER_INPUT_PACKET) return d;
+    d.mot_x = in.getFloat();
+    d.mot_y = in.getFloat();
+    const auto flags = in.getByte();
+    d.jumping = (flags & 0x80) != 0;
+    d.sneaking = (flags & 0x40) != 0;
     d.ok = true;
   } catch (...) {
     d.ok = false;

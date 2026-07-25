@@ -76,6 +76,14 @@ std::string Level::furnacePath() const {
   return data_path_ + "/furnaces.dat";
 }
 
+std::string Level::signPath() const {
+  return data_path_ + "/signs.dat";
+}
+
+std::string Level::hopperPath() const {
+  return data_path_ + "/hoppers.dat";
+}
+
 bool Level::tryLoadChunk(int cx, int cz, Chunk& out) {
   if (data_path_.empty()) return false;
   return Chunk::loadFromFile(chunkPath(cx, cz), out);
@@ -87,13 +95,40 @@ Chunk& Level::getOrCreateChunk(int cx, int cz) {
   auto it = chunks_.find(key);
   if (it != chunks_.end()) return it->second;
   Chunk chunk;
+  bool loaded = false;
   if (tryLoadChunk(cx, cz, chunk)) {
-    auto [ins, _] = chunks_.emplace(key, std::move(chunk));
-    return ins->second;
+    loaded = true;
+  } else {
+    chunk = generate(cx, cz);
+    chunk.markDirty(true); // new terrain — persist on first autosave so edits accumulate
   }
-  chunk = generate(cx, cz);
-  chunk.markDirty(true); // new terrain — persist on first autosave so edits accumulate
   auto [ins, _] = chunks_.emplace(key, std::move(chunk));
+  // Register orphan hopper tiles under the same lock (hoppers.dat may miss blocks that
+  // still exist in chunk terrain). Do NOT call getOrCreateHopper here — it re-locks mu_.
+  if (loaded) {
+    const int base_x = cx * 16;
+    const int base_z = cz * 16;
+    auto& c = ins->second;
+    for (int lz = 0; lz < 16; ++lz) {
+      for (int lx = 0; lx < 16; ++lx) {
+        for (int y = 0; y < kChunkHeight; ++y) {
+          if (c.getBlockId(lx, y, lz) != protocol::BLOCK_HOPPER) continue;
+          const int wx = base_x + lx;
+          const int wz = base_z + lz;
+          const auto hkey = blockPosKey(wx, y, wz);
+          if (hoppers_.find(hkey) != hoppers_.end()) continue;
+          HopperInv inv;
+          inv.x = wx;
+          inv.y = y;
+          inv.z = wz;
+          inv.slots.assign(5, item::ItemStack::air());
+          inv.cooldown = 0;
+          inv.dirty = true;
+          hoppers_.emplace(hkey, std::move(inv));
+        }
+      }
+    }
+  }
   return ins->second;
 }
 
@@ -365,6 +400,214 @@ void Level::loadFurnaces() {
   util::Logger::instance().info("Loaded ", furnaces_.size(), " furnaces for world ", settings_.name);
 }
 
+Level::HopperInv& Level::getOrCreateHopper(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  const auto key = blockPosKey(x, y, z);
+  auto it = hoppers_.find(key);
+  if (it != hoppers_.end()) return it->second;
+  HopperInv inv;
+  inv.x = x;
+  inv.y = y;
+  inv.z = z;
+  inv.slots.assign(5, item::ItemStack::air());
+  inv.cooldown = 0;
+  inv.dirty = true;
+  auto [ins, _] = hoppers_.emplace(key, std::move(inv));
+  return ins->second;
+}
+
+Level::HopperInv* Level::getHopper(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  auto it = hoppers_.find(blockPosKey(x, y, z));
+  if (it == hoppers_.end()) return nullptr;
+  return &it->second;
+}
+
+void Level::removeHopper(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  hoppers_.erase(blockPosKey(x, y, z));
+}
+
+std::vector<Level::HopperInv> Level::hoppersInChunk(int cx, int cz) const {
+  std::lock_guard lock(mu_);
+  std::vector<HopperInv> out;
+  const int min_x = cx * 16;
+  const int max_x = min_x + 15;
+  const int min_z = cz * 16;
+  const int max_z = min_z + 15;
+  for (const auto& [_, h] : hoppers_) {
+    if (h.x >= min_x && h.x <= max_x && h.z >= min_z && h.z <= max_z) out.push_back(h);
+  }
+  return out;
+}
+
+void Level::saveHoppers() {
+  if (data_path_.empty()) return;
+  std::error_code ec;
+  fs::create_directories(data_path_, ec);
+  std::ofstream out(hopperPath(), std::ios::binary | std::ios::trunc);
+  if (!out) return;
+  // HOP1: xyz + 5 slots
+  out.write("HOP1", 4);
+  std::lock_guard lock(mu_);
+  std::uint32_t count = static_cast<std::uint32_t>(hoppers_.size());
+  out.write(reinterpret_cast<const char*>(&count), 4);
+  for (auto& [_, c] : hoppers_) {
+    out.write(reinterpret_cast<const char*>(&c.x), 4);
+    out.write(reinterpret_cast<const char*>(&c.y), 4);
+    out.write(reinterpret_cast<const char*>(&c.z), 4);
+    std::uint16_t slots = static_cast<std::uint16_t>(c.slots.size());
+    out.write(reinterpret_cast<const char*>(&slots), 2);
+    for (const auto& s : c.slots) {
+      std::int16_t id = s.id;
+      std::uint8_t cnt = s.count;
+      std::int16_t dmg = s.damage;
+      out.write(reinterpret_cast<const char*>(&id), 2);
+      out.write(reinterpret_cast<const char*>(&cnt), 1);
+      out.write(reinterpret_cast<const char*>(&dmg), 2);
+    }
+    out.write(reinterpret_cast<const char*>(&c.cooldown), 4);
+    c.dirty = false;
+  }
+}
+
+void Level::loadHoppers() {
+  if (data_path_.empty()) return;
+  std::ifstream in(hopperPath(), std::ios::binary);
+  if (!in) return;
+  char magic[4]{};
+  in.read(magic, 4);
+  if (std::memcmp(magic, "HOP1", 4) != 0) return;
+  std::uint32_t count = 0;
+  in.read(reinterpret_cast<char*>(&count), 4);
+  std::lock_guard lock(mu_);
+  for (std::uint32_t i = 0; i < count && in; ++i) {
+    HopperInv inv;
+    in.read(reinterpret_cast<char*>(&inv.x), 4);
+    in.read(reinterpret_cast<char*>(&inv.y), 4);
+    in.read(reinterpret_cast<char*>(&inv.z), 4);
+    std::uint16_t slots = 0;
+    in.read(reinterpret_cast<char*>(&slots), 2);
+    inv.slots.assign(5, item::ItemStack::air());
+    for (std::uint16_t s = 0; s < slots && s < 5; ++s) {
+      std::int16_t id = 0;
+      std::uint8_t cnt = 0;
+      std::int16_t dmg = 0;
+      in.read(reinterpret_cast<char*>(&id), 2);
+      in.read(reinterpret_cast<char*>(&cnt), 1);
+      in.read(reinterpret_cast<char*>(&dmg), 2);
+      inv.slots[s] = item::sanitizeSlot(item::ItemStack::of(id, cnt, dmg));
+    }
+    in.read(reinterpret_cast<char*>(&inv.cooldown), 4);
+    if (inv.cooldown < 0) inv.cooldown = 0;
+    inv.dirty = false;
+    hoppers_[blockPosKey(inv.x, inv.y, inv.z)] = std::move(inv);
+  }
+  util::Logger::instance().info("Loaded ", hoppers_.size(), " hoppers for world ", settings_.name);
+}
+
+Level::SignTile& Level::getOrCreateSign(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  const auto key = blockPosKey(x, y, z);
+  auto it = signs_.find(key);
+  if (it != signs_.end()) return it->second;
+  SignTile t;
+  t.x = x;
+  t.y = y;
+  t.z = z;
+  t.dirty = true;
+  auto [ins, _] = signs_.emplace(key, std::move(t));
+  return ins->second;
+}
+
+Level::SignTile* Level::getSign(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  auto it = signs_.find(blockPosKey(x, y, z));
+  if (it == signs_.end()) return nullptr;
+  return &it->second;
+}
+
+void Level::removeSign(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  signs_.erase(blockPosKey(x, y, z));
+}
+
+std::vector<Level::SignTile> Level::signsInChunk(int cx, int cz) const {
+  std::lock_guard lock(mu_);
+  std::vector<SignTile> out;
+  const int min_x = cx * 16;
+  const int max_x = min_x + 15;
+  const int min_z = cz * 16;
+  const int max_z = min_z + 15;
+  for (const auto& [_, s] : signs_) {
+    if (s.x >= min_x && s.x <= max_x && s.z >= min_z && s.z <= max_z) out.push_back(s);
+  }
+  return out;
+}
+
+void Level::saveSigns() {
+  if (data_path_.empty()) return;
+  std::error_code ec;
+  fs::create_directories(data_path_, ec);
+  std::ofstream out(signPath(), std::ios::binary | std::ios::trunc);
+  if (!out) return;
+  // SGN1: count + per sign: xyz + 4 text strings (u16le len + bytes) + creator string
+  out.write("SGN1", 4);
+  std::lock_guard lock(mu_);
+  std::uint32_t count = static_cast<std::uint32_t>(signs_.size());
+  out.write(reinterpret_cast<const char*>(&count), 4);
+  auto writeStr = [&](const std::string& s) {
+    std::uint16_t n = static_cast<std::uint16_t>(std::min<std::size_t>(s.size(), 65535));
+    out.write(reinterpret_cast<const char*>(&n), 2);
+    if (n) out.write(s.data(), n);
+  };
+  for (auto& [_, s] : signs_) {
+    out.write(reinterpret_cast<const char*>(&s.x), 4);
+    out.write(reinterpret_cast<const char*>(&s.y), 4);
+    out.write(reinterpret_cast<const char*>(&s.z), 4);
+    writeStr(s.text1);
+    writeStr(s.text2);
+    writeStr(s.text3);
+    writeStr(s.text4);
+    writeStr(s.creator);
+    s.dirty = false;
+  }
+}
+
+void Level::loadSigns() {
+  if (data_path_.empty()) return;
+  std::ifstream in(signPath(), std::ios::binary);
+  if (!in) return;
+  char magic[4]{};
+  in.read(magic, 4);
+  if (std::memcmp(magic, "SGN1", 4) != 0) return;
+  std::uint32_t count = 0;
+  in.read(reinterpret_cast<char*>(&count), 4);
+  auto readStr = [&]() -> std::string {
+    std::uint16_t n = 0;
+    in.read(reinterpret_cast<char*>(&n), 2);
+    if (!in || n == 0) return {};
+    std::string s(n, '\0');
+    in.read(s.data(), n);
+    return s;
+  };
+  std::lock_guard lock(mu_);
+  for (std::uint32_t i = 0; i < count && in; ++i) {
+    SignTile t;
+    in.read(reinterpret_cast<char*>(&t.x), 4);
+    in.read(reinterpret_cast<char*>(&t.y), 4);
+    in.read(reinterpret_cast<char*>(&t.z), 4);
+    t.text1 = readStr();
+    t.text2 = readStr();
+    t.text3 = readStr();
+    t.text4 = readStr();
+    t.creator = readStr();
+    t.dirty = false;
+    signs_[blockPosKey(t.x, t.y, t.z)] = std::move(t);
+  }
+  util::Logger::instance().info("Loaded ", signs_.size(), " signs for world ", settings_.name);
+}
+
 const Chunk* Level::getChunk(int cx, int cz) const {
   std::lock_guard lock(mu_);
   const auto key = chunkKey(cx, cz);
@@ -414,6 +657,45 @@ std::string Level::chunkNetworkPayload(int cx, int cz) {
     payload += protocol::encodeChestSpawnNbt(chest.x, chest.y, chest.z, paired,
                                              paired ? chest.pair_x : 0,
                                              paired ? chest.pair_z : 0);
+  }
+
+  // Hopper tiles in this chunk (PE 0.14 needs trailing Hopper NBT or client treats as ghost)
+  std::vector<HopperInv> hop_list = hoppersInChunk(cx, cz);
+  {
+    const int base_x = cx * 16;
+    const int base_z = cz * 16;
+    for (int lz = 0; lz < 16; ++lz) {
+      for (int lx = 0; lx < 16; ++lx) {
+        for (int y = 0; y < 128; ++y) {
+          const int wx = base_x + lx;
+          const int wz = base_z + lz;
+          if (getBlockId(wx, y, wz) != protocol::BLOCK_HOPPER) continue;
+          bool found = false;
+          for (const auto& h : hop_list) {
+            if (h.x == wx && h.y == y && h.z == wz) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            auto& inv = getOrCreateHopper(wx, y, wz);
+            hop_list.push_back(inv);
+          }
+        }
+      }
+    }
+  }
+  for (const auto& hop : hop_list) {
+    if (getBlockId(hop.x, hop.y, hop.z) != protocol::BLOCK_HOPPER) continue;
+    payload += protocol::encodeHopperSpawnNbt(hop.x, hop.y, hop.z);
+  }
+
+  // Sign tiles in this chunk (PM FullChunk trailing tile NBT)
+  for (const auto& sign : signsInChunk(cx, cz)) {
+    const auto bid = getBlockId(sign.x, sign.y, sign.z);
+    if (bid != protocol::BLOCK_SIGN_POST && bid != protocol::BLOCK_WALL_SIGN) continue;
+    payload += protocol::encodeSignSpawnNbt(sign.x, sign.y, sign.z, sign.text1, sign.text2,
+                                            sign.text3, sign.text4);
   }
   return payload;
 }
@@ -822,6 +1104,8 @@ Level& LevelManager::create(LevelSettings settings) {
   fs::create_directories(ptr->dataPath() + "/chunks", ec);
   ptr->loadChests();
   ptr->loadFurnaces();
+  ptr->loadHoppers();
+  ptr->loadSigns();
   // Auto spawn: largest flat plane in 3x3 chunks around 0,0 (columns within 100 of origin).
   // Flat worlds still scan (fast); result ~0,5,0. Normal/nether/end get a real platform.
   try {
@@ -861,6 +1145,8 @@ int LevelManager::saveAll(bool force_all) {
     int n = lvl->saveDirtyChunks(force_all);
     lvl->saveChests();
     lvl->saveFurnaces();
+    lvl->saveHoppers();
+    lvl->saveSigns();
     if (n > 0) {
       util::Logger::instance().info("Saved world ", name, " chunks=", n);
     }

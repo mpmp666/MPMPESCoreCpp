@@ -55,6 +55,9 @@ void mpmpes_on_player_join(const MpmpesEventPlayerJoin* ev) {
   std::snprintf(buf, sizeof(buf), "HelloCpp: player_join %s @ %s",
                 ev->username ? ev->username : "?", ev->world ? ev->world : "?");
   g_host->log_info(buf);
+  if (g_host->send_message && ev->username) {
+    g_host->send_message(ev->username, "Welcome! (HelloCpp API v3)");
+  }
 }
 
 void mpmpes_on_player_quit(const MpmpesEventPlayerQuit* ev) {
@@ -70,6 +73,18 @@ void mpmpes_on_world_load(const MpmpesEventWorldLoad* ev) {
   char buf[256];
   std::snprintf(buf, sizeof(buf), "HelloCpp: world_load %s gen=%d",
                 ev->name ? ev->name : "?", static_cast<int>(ev->generator));
+  g_host->log_info(buf);
+}
+
+void mpmpes_on_sign_change(MpmpesEventSignChange* ev) {
+  if (!g_host || !g_host->log_info || !ev) return;
+  char buf[512];
+  std::snprintf(buf, sizeof(buf),
+                "HelloCpp: sign_change %s @ %d,%d,%d |%s|%s|%s|%s|",
+                ev->username ? ev->username : "?", static_cast<int>(ev->x),
+                static_cast<int>(ev->y), static_cast<int>(ev->z),
+                ev->line1 ? ev->line1 : "", ev->line2 ? ev->line2 : "",
+                ev->line3 ? ev->line3 : "", ev->line4 ? ev->line4 : "");
   g_host->log_info(buf);
 }
 

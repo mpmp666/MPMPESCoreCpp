@@ -33,14 +33,21 @@ struct ItemStack {
 };
 
 // Clamp slot fields so PE clients never see garbage ids/counts (client crash risk).
+// PE 0.14.x Win/Android is brittle: wild id/count/damage/NBT in inventory or creative
+// palette can hard-crash the client on click / open inventory.
 inline ItemStack sanitizeSlot(ItemStack s) {
   if (s.id <= 0 || s.count == 0) return ItemStack::air();
-  // 0.14 item/block ids are small; reject wild values from corrupt disk
-  if (s.id > 512) return ItemStack::air();
+  // 0.14 item/block ids stay well under 512; reject wild values from corrupt disk/packets
+  if (s.id > 511) return ItemStack::air();
+  // Hopper places as item 410, never block form 154 in inventory/creative UI
+  if (s.id == 154) s.id = 410;
+  // Unpowered comparator block 149 → comparator item 404 (if present)
+  if (s.id == 149) s.id = 404;
   if (s.count > 64) s.count = 64;
+  // damage is int16_t on wire; clamp negatives only (aux/meta never negative)
   if (s.damage < 0) s.damage = 0;
-  // drop oversized NBT (we never write NBT for furnace yet)
-  if (s.nbt.size() > 4096) s.nbt.clear();
+  // drop oversized / nonsense NBT (creative picks rarely need NBT; corrupt NBT crashes Win)
+  if (s.nbt.size() > 1024) s.nbt.clear();
   return s;
 }
 
@@ -64,8 +71,17 @@ inline ItemStack getSlot(binary::BinaryStream& in) {
   s.count = in.getByte();
   s.damage = static_cast<std::int16_t>(in.getShort());
   auto nbt_len = in.getLShort();
-  if (nbt_len > 0) s.nbt = in.get(nbt_len);
-  return s;
+  // Cap NBT read so a corrupt packet cannot blow memory / later crash clients on resync
+  if (nbt_len > 0) {
+    if (nbt_len > 1024) {
+      // consume bounded then drop; if stream short, get() throws and caller marks !ok
+      (void)in.get(nbt_len);
+      s.nbt.clear();
+    } else {
+      s.nbt = in.get(nbt_len);
+    }
+  }
+  return sanitizeSlot(s);
 }
 
 // Common IDs (0.14)
@@ -174,9 +190,16 @@ inline constexpr std::int16_t BUCKET = 325;
 inline constexpr std::int16_t WATER_BUCKET = 326;
 inline constexpr std::int16_t LAVA_BUCKET = 327;
 inline constexpr std::int16_t MINECART = 328;
+// PE/Java item ids (0.14 client accepts these creative/spawn ids)
+inline constexpr std::int16_t MINECART_CHEST = 342;
+inline constexpr std::int16_t MINECART_TNT = 407;
+inline constexpr std::int16_t MINECART_HOPPER = 408;
+inline constexpr std::int16_t HOPPER = 410; // places block 154
 inline constexpr std::int16_t SADDLE = 329;
 inline constexpr std::int16_t IRON_DOOR = 330;
 inline constexpr std::int16_t REDSTONE = 331;
+inline constexpr std::int16_t REPEATER = 356;
+inline constexpr std::int16_t COMPARATOR = 404; // place → unpowered comparator 149
 inline constexpr std::int16_t SNOWBALL = 332;
 inline constexpr std::int16_t BOAT = 333;
 inline constexpr std::int16_t LEATHER = 334;
@@ -519,6 +542,11 @@ inline std::vector<ItemStack> creativeItems() {
   add(347);
   add(345);
   add(328);
+  // PE 0.14 item forms only — block id 154 / comparator block 149 in creative crash some clients
+  add(342);  // minecart with chest
+  add(407);  // minecart with TNT
+  add(408);  // minecart with hopper
+  add(410);  // hopper item (places block 154)
   add(333);
   add(333, 1);
   add(333, 2);
@@ -605,6 +633,8 @@ inline std::vector<ItemStack> creativeItems() {
   add(151);
   add(131);
   add(356);
+  // Comparator item 404 is optional 0.14 fork content; omit block 149 (client crash risk).
+  // Keep only item form if needed later via /give; Genisys vanilla creative has repeater only.
   add(125, 3);
   add(23, 3);
   add(332);
@@ -799,7 +829,17 @@ inline std::vector<ItemStack> starterInventory(bool creative) {
 }
 
 // Block id that should be placed for an item (blocks 0-255 map 1:1 for most)
+// Special-case item ids that are not block ids (PM Item::get / place).
 inline std::uint8_t itemToBlockId(std::int16_t item_id) {
+  using namespace ids;
+  if (item_id == SIGN) return 63; // SIGN_POST; wall vs post decided at place time
+  if (item_id == REDSTONE) return 55; // redstone wire
+  if (item_id == REPEATER) return 93; // unpowered repeater
+  if (item_id == COMPARATOR) return 149; // unpowered comparator
+  if (item_id == MINECART || item_id == MINECART_CHEST || item_id == MINECART_TNT ||
+      item_id == MINECART_HOPPER)
+    return 0; // entity, not block
+  if (item_id == HOPPER) return 154; // hopper block
   if (item_id > 0 && item_id < 256) return static_cast<std::uint8_t>(item_id);
   return 0;
 }
@@ -981,10 +1021,35 @@ inline ItemStack breakDrop(std::uint8_t block_id, std::uint8_t meta) {
       return ItemStack::air();
     case BEDROCK:
       return ItemStack::air();
+    case 63: // SIGN_POST
+    case 68: // WALL_SIGN
+      return ItemStack::of(SIGN, 1, 0);
+    case 55: // REDSTONE_WIRE
+      return ItemStack::of(REDSTONE, 1, 0);
+    case 93: // UNPOWERED_REPEATER
+    case 94: // POWERED_REPEATER
+      return ItemStack::of(REPEATER, 1, 0);
+    case 149: // UNPOWERED_COMPARATOR
+    case 150: // POWERED_COMPARATOR
+      return ItemStack::of(COMPARATOR, 1, 0);
+    case 75: // UNLIT_REDSTONE_TORCH
+    case 76: // REDSTONE_TORCH
+      return ItemStack::of(76, 1, 0);
+    case 123: // inactive lamp
+    case 124: // active lamp
+      return ItemStack::of(123, 1, 0);
+    case 27: // powered rail — drop without power bit
+    case 28:
+    case 126:
+      return ItemStack::of(static_cast<std::int16_t>(block_id), 1, 0);
+    case 66:
+      return ItemStack::of(66, 1, 0);
+    case 154: // hopper block → hopper item
+      return ItemStack::of(HOPPER, 1, 0);
     case 0:
       return ItemStack::air();
     default:
-      return ItemStack::of(static_cast<std::int16_t>(block_id), 1, meta);
+      return ItemStack::of(static_cast<std::int16_t>(block_id), 1, meta & 0x0f);
   }
 }
 

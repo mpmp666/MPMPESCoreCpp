@@ -74,6 +74,13 @@ struct BlockEvent {
   std::int32_t face = 0;
 };
 
+struct SignChangeEvent {
+  std::string username;
+  std::int32_t x = 0, y = 0, z = 0;
+  std::string text1, text2, text3, text4;
+  bool cancelled = false;
+};
+
 struct WorldLoadEvent {
   std::string name;
   std::int32_t generator = 0;
@@ -96,6 +103,7 @@ public:
   virtual void onCommand(CommandEvent& ev) = 0;
   virtual void onMove(const MoveEvent& ev) = 0;
   virtual void onBlock(const BlockEvent& ev) = 0;
+  virtual void onSignChange(SignChangeEvent& ev) = 0;
   virtual void onWorldLoad(const WorldLoadEvent& ev) = 0;
 };
 
@@ -121,6 +129,7 @@ public:
   void fireCommand(CommandEvent& ev);
   void fireMove(const MoveEvent& ev);
   void fireBlock(const BlockEvent& ev);
+  void fireSignChange(SignChangeEvent& ev);
   void fireWorldLoad(const WorldLoadEvent& ev);
 
   std::size_t size() const { return plugins_.size(); }

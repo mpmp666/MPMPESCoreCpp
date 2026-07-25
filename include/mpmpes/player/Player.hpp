@@ -64,13 +64,16 @@ struct Player {
   double pending_tx_time = 0; // wall seconds; expire ~8s like PM
 
   // Open container window: window_id 2..99
-  // open_container_type: 0=chest(27), 2=furnace(3)
+  // open_container_type: 0=chest(27), 2=furnace(3), 8=hopper(5)
   std::uint8_t open_window_id = 0; // 0 = none
   std::uint8_t open_container_type = 0;
   int open_chest_x = 0, open_chest_y = -1, open_chest_z = 0;
   // Double chest: partner half (INT_MIN = single). UI slots 0..26 left, 27..53 right.
   int open_pair_x = 0x80000000, open_pair_z = 0x80000000;
+  // Entity container (chest/hopper minecart). 0 = block-based container.
+  std::int64_t open_entity_eid = 0;
   bool openChestPaired() const { return open_pair_x != static_cast<int>(0x80000000); }
+  bool openEntityContainer() const { return open_entity_eid != 0; }
 
   // Loaded from players/*.dat before spawn
   bool has_saved_data = false;
@@ -90,6 +93,14 @@ struct Player {
   // Client sky/atmosphere dim override (any wire value). -1 = follow level.
   // Used by visual-dim experiments without world switch; not remapped/whitelist-filtered.
   int visual_dim = -1;
+
+  // Minecart ride: vehicle entity eid (0 = not riding)
+  std::int64_t riding_eid = 0;
+  // PlayerInput (0xbe) while riding: motX=strafe, motY=forward (-1..1); jump/sneak flags
+  float ride_input_x = 0.f;
+  float ride_input_y = 0.f;
+  bool ride_jumping = false;
+  bool ride_sneaking = false;
 
   std::set<std::pair<int, int>> sent_chunks;
   std::set<std::int64_t> known_entities;

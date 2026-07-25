@@ -6,7 +6,7 @@
 - 来源：`~/MPMPESCore`（Genisys / PocketMine-MP 分支）
 - 许可：与上游一致，LGPL-3.0（衍生）
 
-## 状态（v0.4 — dig/place + 创造 + 合成 + 生物 AI）
+## 状态（v0.4 — dig/place + 创造 + 合成 + 生物 AI + 铁轨/红石）
 
 已实现：
 
@@ -19,14 +19,18 @@
 - **创造背包** + 玩家物品栏 + `MobEquipment` 热键
 - **合成 stub**：`CraftingData` 基础配方 + `CraftingEvent` 接受结果
 - **生物 AI**：猪/鸡/牛/羊/僵尸（游荡 + 重力），`AddEntity`/`MoveEntity`/`RemoveEntity`
+- **铁轨自动合并**：普通轨/动力轨/探测轨/激活轨放置与破坏时按邻居重算 meta（直轨/弯轨/坡轨）
+- **矿车/铁路**：物品 328 放轨生成实体 84，右键乘坐，`SetEntityLink`，轨上滑动；攻击矿车掉落
+- **红石子集**：红石粉强度 BFS、拉杆、红石火把、中继器、红石块、红石灯、动力轨供电；比较器 149/150（读箱子填充；0.14 客户端可能显示异常）
 - 命令：`/help` `/list` `/me` `/worlds` `/goto` `/spawn` `/gm` `/give` `/spawnmob` `/clear`
-- 插件事件：join/quit/chat/command/move/block/world_load
+- 插件事件：join/quit/chat/command/move/block/world_load + 告示牌 API v3
 
 未实现 / 粗糙处：
 
 - 客户端 Batch zlib 解压
 - 完整合成校验 / 熔炉 UI 计时
 - 路径寻路、仇恨 AI、死亡掉落实体
+- 完整红石准连接 / 中继器 tick 延迟仿真 / 活塞
 - 区块落盘、完整地形噪声
 
 ## 构建

@@ -1,15 +1,19 @@
 #include "mpmpes/server/Server.hpp"
 
+#include "mpmpes/block/Rails.hpp"
+#include "mpmpes/block/Redstone.hpp"
 #include "mpmpes/item/Item.hpp"
+#include "mpmpes/plugin/PluginHostAccess.hpp"
 #include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
-#include <functional>
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstring>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <random>
@@ -25,6 +29,42 @@ std::atomic<Server*> g_server{nullptr};
 void onSignal(int) {
   if (auto* s = g_server.load()) s->stop();
 }
+
+// Plugin host bridge: free function pointers → Server public pluginHost* methods
+void hostBrBroadcast(void* ctx, const char* msg) {
+  if (auto* s = static_cast<Server*>(ctx)) s->pluginHostBroadcast(msg);
+}
+int hostBrSendMessage(void* ctx, const char* username, const char* msg) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostSendMessage(username, msg) : 0;
+}
+int hostBrPlayerCount(void* ctx) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostPlayerCount() : 0;
+}
+int hostBrGetPlayerPos(void* ctx, const char* username, float* x, float* y, float* z, char* world_out,
+                       int world_out_len) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostGetPlayerPos(username, x, y, z, world_out, world_out_len) : 0;
+}
+int hostBrSetBlock(void* ctx, const char* world, int x, int y, int z, int id, int meta) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostSetBlock(world, x, y, z, id, meta) : 0;
+}
+int hostBrGetBlock(void* ctx, const char* world, int x, int y, int z) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostGetBlock(world, x, y, z) : -1;
+}
+int hostBrSetSignText(void* ctx, const char* world, int x, int y, int z, const char* t1,
+                      const char* t2, const char* t3, const char* t4) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostSetSignText(world, x, y, z, t1, t2, t3, t4) : 0;
+}
+int hostBrKickPlayer(void* ctx, const char* username, const char* reason) {
+  auto* s = static_cast<Server*>(ctx);
+  return s ? s->pluginHostKickPlayer(username, reason) : 0;
+}
+
 } // namespace
 
 Server::Server(ServerConfig cfg) : cfg_(std::move(cfg)) {
@@ -50,6 +90,112 @@ void Server::broadcastBlockUpdate(level::Level* level, int x, int y, int z, std:
   auto pk = protocol::encodeUpdateBlock(x, y, z, id, meta, protocol::UPDATE_FLAG_ALL);
   players_->broadcastNear(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
                           static_cast<float>(z) + 0.5f, 128.f, pk, level, except);
+}
+
+void Server::enqueueRedstoneSchedule(level::Level* level, const block::RedstoneSchedule& s) {
+  if (!level || s.delay_ticks < 0) return;
+  // Same pos + target id replaces existing entry (Genisys scheduleUpdate overwrite)
+  for (auto& p : redstone_schedules_) {
+    if (p.level == level && p.s.x == s.x && p.s.y == s.y && p.s.z == s.z && p.s.id == s.id) {
+      p.s.meta = s.meta;
+      p.s.delay_ticks = s.delay_ticks;
+      return;
+    }
+  }
+  redstone_schedules_.push_back({level, s});
+}
+
+void Server::recomputeAndBroadcastRedstone(level::Level* level, int x, int y, int z, int radius) {
+  if (!level) return;
+  std::vector<block::RedstoneUpdate> rs;
+  std::vector<block::RedstoneSchedule> scheduled;
+  block::recomputeRedstone(*level, x, y, z, radius, rs, &scheduled);
+  for (auto& u : rs) {
+    broadcastBlockUpdate(level, u.x, u.y, u.z, u.id, u.meta, nullptr);
+  }
+  for (const auto& s : scheduled) enqueueRedstoneSchedule(level, s);
+}
+
+void Server::tickRedstoneSchedules() {
+  if (redstone_schedules_.empty()) return;
+  std::vector<PendingRedstone> due;
+  due.reserve(redstone_schedules_.size());
+  std::vector<PendingRedstone> keep;
+  keep.reserve(redstone_schedules_.size());
+  for (auto& p : redstone_schedules_) {
+    if (!p.level) continue;
+    --p.s.delay_ticks;
+    if (p.s.delay_ticks <= 0) due.push_back(p);
+    else keep.push_back(p);
+  }
+  redstone_schedules_ = std::move(keep);
+  for (const auto& p : due) {
+    if (!p.level) continue;
+    const auto cur = p.level->getBlockId(p.s.x, p.s.y, p.s.z);
+    // Only apply if still a repeater at this cell
+    if (cur != protocol::BLOCK_UNPOWERED_REPEATER && cur != protocol::BLOCK_POWERED_REPEATER)
+      continue;
+    // Preserve current delay bits if meta stale; prefer scheduled meta facing/delay
+    const auto meta = p.s.meta;
+    if (cur == p.s.id) continue; // already in desired state
+    p.level->setBlock(p.s.x, p.s.y, p.s.z, p.s.id, meta);
+    broadcastBlockUpdate(p.level, p.s.x, p.s.y, p.s.z, p.s.id, meta, nullptr);
+    // Recompute around flipped diode (may schedule further flips)
+    recomputeAndBroadcastRedstone(p.level, p.s.x, p.s.y, p.s.z, 16);
+  }
+}
+
+void Server::broadcastEntityLink(level::Level* level, std::int64_t from, std::int64_t to,
+                                 std::uint8_t type, player::Player* rider) {
+  if (!players_ || !level) return;
+  // World view: from=vehicle, to=passenger
+  auto pk = protocol::encodeSetEntityLink(from, to, type);
+  players_->broadcastNear(rider ? rider->x : 0.f, rider ? rider->y : 0.f, rider ? rider->z : 0.f,
+                          64.f, pk, level, nullptr);
+  // Rider self uses to=0 (PM setLinked)
+  if (rider && rider->spawned) {
+    auto self_pk = protocol::encodeSetEntityLink(from, 0, type);
+    players_->sendPacket(*rider, std::move(self_pk), true);
+  }
+}
+
+void Server::dismountPlayer(player::Player& p) {
+  if (p.riding_eid == 0) return;
+  auto* cart = entities_.get(p.riding_eid);
+  const auto veh = p.riding_eid;
+  p.riding_eid = 0;
+  // Offset off the cart so the client is not stuck re-mounting / clipping
+  float ox = -std::sin(p.yaw * 3.14159265f / 180.f);
+  float oz = std::cos(p.yaw * 3.14159265f / 180.f);
+  if (cart && !cart->closed) {
+    p.x = cart->x - oz * 0.85f; // side-step off track a bit
+    p.y = cart->y + 0.6f;
+    p.z = cart->z + ox * 0.85f;
+    cart->linked_eid = 0;
+    cart->linked_type = 0;
+    cart->motion_x *= 0.3f;
+    cart->motion_z *= 0.3f;
+    broadcastEntityLink(cart->level ? cart->level : p.level, veh, p.entity_id, 3, &p);
+  } else if (p.level) {
+    p.y += 0.6f;
+    broadcastEntityLink(p.level, veh, p.entity_id, 3, &p);
+  }
+  p.on_ground_ = true;
+  p.fall_distance_ = 0.f;
+  if (players_) {
+    auto mself =
+        protocol::encodeMovePlayer(0, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 0, true);
+    players_->sendPacket(p, mself, true);
+    if (p.entity_id != 0 && p.level) {
+      auto mview =
+          protocol::encodeMovePlayer(p.entity_id, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 0, true);
+      for (auto& [_, other] : players_->all()) {
+        if (!other.spawned || &other == &p || other.level != p.level) continue;
+        if (!other.known_players.count(p.entity_id)) continue;
+        players_->sendPacket(other, mview, false);
+      }
+    }
+  }
 }
 
 void Server::breakBlock(player::Player& p, int x, int y, int z) {
@@ -119,6 +265,41 @@ void Server::breakBlock(player::Player& p, int x, int y, int z) {
       }
       p.level->removeFurnace(x, y, z);
     }
+  } else if (id == protocol::BLOCK_HOPPER) {
+    if (auto* hop = p.level->getHopper(x, y, z)) {
+      std::mt19937 rng{std::random_device{}()};
+      std::uniform_real_distribution<float> j(-0.15f, 0.15f);
+      for (auto& slot : hop->slots) {
+        if (slot.empty()) continue;
+        dropItemInWorld(p.level, static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
+                        static_cast<float>(z) + 0.5f, slot, j(rng), 0.25f, j(rng), 0);
+      }
+      p.level->removeHopper(x, y, z);
+    }
+  } else if (id == protocol::BLOCK_SIGN_POST || id == protocol::BLOCK_WALL_SIGN) {
+    p.level->removeSign(x, y, z);
+  }
+
+  // Rails: re-merge neighbors after break
+  if (block::isRailId(id)) {
+    std::vector<std::array<int, 5>> updates;
+    block::updateRailsAround(*p.level, x, y, z, updates);
+    for (auto& u : updates) {
+      broadcastBlockUpdate(p.level, u[0], u[1], u[2], static_cast<std::uint8_t>(u[3]),
+                           static_cast<std::uint8_t>(u[4]), nullptr);
+    }
+  }
+
+  // Redstone: recompute around break (uses schedule queue)
+  if (id == protocol::BLOCK_REDSTONE_WIRE || id == protocol::BLOCK_REDSTONE_BLOCK ||
+      id == protocol::BLOCK_REDSTONE_TORCH || id == protocol::BLOCK_UNLIT_REDSTONE_TORCH ||
+      id == protocol::BLOCK_LEVER || id == protocol::BLOCK_UNPOWERED_REPEATER ||
+      id == protocol::BLOCK_POWERED_REPEATER || id == protocol::BLOCK_UNPOWERED_COMPARATOR ||
+      id == protocol::BLOCK_POWERED_COMPARATOR || id == protocol::BLOCK_INACTIVE_REDSTONE_LAMP ||
+      id == protocol::BLOCK_ACTIVE_REDSTONE_LAMP || id == protocol::BLOCK_DAYLIGHT_SENSOR ||
+      id == protocol::BLOCK_POWERED_RAIL || id == protocol::BLOCK_ACTIVATOR_RAIL ||
+      id == protocol::BLOCK_DETECTOR_RAIL || id == protocol::BLOCK_HOPPER) {
+    recomputeAndBroadcastRedstone(p.level, x, y, z, 16);
   }
 
   // Drop into world: survival always; creative when always_drop_on_break
@@ -164,6 +345,46 @@ void Server::placeBlock(player::Player& p, int x, int y, int z, std::uint8_t fac
   // replace air only
   if (p.level->getBlockId(px, py, pz) != 0) return;
 
+  // Minecart items: spawn entity on rail (normal / hopper / TNT / chest)
+  if (held.id == item::ids::MINECART || held.id == item::ids::MINECART_HOPPER ||
+      held.id == item::ids::MINECART_TNT || held.id == item::ids::MINECART_CHEST) {
+    int sx = x, sy = y, sz = z;
+    bool on_rail = block::isRailId(p.level->getBlockId(sx, sy, sz));
+    if (!on_rail) {
+      sx = px;
+      sy = py;
+      sz = pz;
+      on_rail = block::isRailId(p.level->getBlockId(sx, sy, sz));
+    }
+    if (!on_rail) {
+      if (py > 0 && block::isRailId(p.level->getBlockId(px, py - 1, pz))) {
+        sx = px;
+        sy = py - 1;
+        sz = pz;
+        on_rail = true;
+      }
+    }
+    if (!on_rail) return;
+    entity::EntityKind kind = entity::EntityKind::Minecart;
+    if (held.id == item::ids::MINECART_HOPPER) kind = entity::EntityKind::MinecartHopper;
+    else if (held.id == item::ids::MINECART_TNT) kind = entity::EntityKind::MinecartTNT;
+    else if (held.id == item::ids::MINECART_CHEST) kind = entity::EntityKind::MinecartChest;
+    auto& e = entities_.spawn(kind, p.level, static_cast<float>(sx) + 0.5f,
+                              static_cast<float>(sy) + 0.125f, static_cast<float>(sz) + 0.5f);
+    e.health = 1.f;
+    e.cart_speed = 0.4f;
+    for (auto& [_, pl] : players_->all()) {
+      if (pl.level == p.level && pl.spawned) spawnEntityToPlayer(pl, e);
+    }
+    if (p.gamemode != 1) {
+      auto& h = p.heldItem();
+      if (h.count > 1) --h.count;
+      else h = item::ItemStack::air();
+      players_->sendInventory(p);
+    }
+    return;
+  }
+
   std::uint8_t block_id = item::itemToBlockId(held.id);
   if (block_id == 0) {
     // spawn egg?
@@ -193,14 +414,109 @@ void Server::placeBlock(player::Player& p, int x, int y, int z, std::uint8_t fac
     return;
   }
 
+  // Rails: auto-merge placement (meta from neighbors)
+  if (block::isRailId(block_id)) {
+    std::vector<std::array<int, 5>> updates;
+    if (!block::placeRailAuto(*p.level, px, py, pz, block_id, updates)) return;
+    for (auto& u : updates) {
+      broadcastBlockUpdate(p.level, u[0], u[1], u[2], static_cast<std::uint8_t>(u[3]),
+                           static_cast<std::uint8_t>(u[4]), nullptr);
+    }
+    recomputeAndBroadcastRedstone(p.level, px, py, pz, 12);
+    if (p.gamemode != 1) {
+      auto& h = p.heldItem();
+      if (h.count > 1) --h.count;
+      else h = item::ItemStack::air();
+      players_->sendInventory(p);
+    }
+    plugin::BlockEvent bev;
+    bev.username = p.username;
+    bev.x = px;
+    bev.y = py;
+    bev.z = pz;
+    bev.action = 100;
+    bev.face = face;
+    plugins_.fireBlock(bev);
+    return;
+  }
+
   // Chest faces player horizontal look (PM faces[] from getDirection)
+  // Sign item (323): wall sign on side face, standing sign on top (PM SignPost::place)
   std::uint8_t meta = static_cast<std::uint8_t>(held.damage & 0x0f);
-  if (block_id == protocol::BLOCK_CHEST) {
+  if (held.id == item::ids::SIGN) {
+    if (face == 0) return; // cannot place on bottom face
+    if (face >= 2 && face <= 5) {
+      block_id = protocol::BLOCK_WALL_SIGN;
+      meta = face; // 2N 3S 4W 5E
+    } else {
+      block_id = protocol::BLOCK_SIGN_POST;
+      meta = protocol::signPostRotationMeta(p.yaw);
+    }
+  } else if (block_id == protocol::BLOCK_CHEST) {
     meta = protocol::horizontalFaceMeta(p.yaw);
+  } else if (block_id == protocol::BLOCK_LEVER) {
+    meta = block::leverPlaceMeta(face, p.yaw);
+  } else if (block_id == protocol::BLOCK_REDSTONE_TORCH ||
+             block_id == protocol::BLOCK_UNLIT_REDSTONE_TORCH || block_id == 50) {
+    // normal torch + redstone torch face meta
+    if (block_id == protocol::BLOCK_UNLIT_REDSTONE_TORCH)
+      block_id = protocol::BLOCK_REDSTONE_TORCH;
+    meta = block::torchPlaceMeta(face);
+  } else if (block_id == protocol::BLOCK_UNPOWERED_REPEATER ||
+             block_id == protocol::BLOCK_POWERED_REPEATER) {
+    block_id = protocol::BLOCK_UNPOWERED_REPEATER;
+    meta = block::repeaterPlaceMeta(p.yaw);
+  } else if (block_id == protocol::BLOCK_UNPOWERED_COMPARATOR ||
+             block_id == protocol::BLOCK_POWERED_COMPARATOR) {
+    block_id = protocol::BLOCK_UNPOWERED_COMPARATOR;
+    meta = block::repeaterPlaceMeta(p.yaw);
+  } else if (block_id == protocol::BLOCK_REDSTONE_WIRE) {
+    meta = 0;
+  } else if (block_id == protocol::BLOCK_ACTIVE_REDSTONE_LAMP) {
+    block_id = protocol::BLOCK_INACTIVE_REDSTONE_LAMP;
+    meta = 0;
+  } else if (block_id == protocol::BLOCK_HOPPER) {
+    // PE HopperBlock placement: face clicked decides spout direction (0 down, 2-5 sides).
+    // Bit 0x8 = disabled by redstone (starts enabled).
+    std::uint8_t facing = 0; // down default
+    if (face >= 2 && face <= 5) {
+      // spout points away from the face we clicked? PE uses opposite of place face for sides.
+      // getPlacementDataValue: attached face = opposite of clicked face for sides.
+      static constexpr std::uint8_t opp_face[6] = {1, 0, 3, 2, 5, 4};
+      facing = opp_face[face];
+      if (facing == 1) facing = 0; // never point up
+    } else if (face == 0) {
+      facing = 0; // clicked bottom of block above → spout down
+    } else {
+      facing = 0; // top face → down
+    }
+    meta = facing & 0x7;
   }
   if (!p.level->setBlock(px, py, pz, block_id, meta)) return;
 
-  if (block_id == protocol::BLOCK_CHEST) {
+  if (block_id == protocol::BLOCK_SIGN_POST || block_id == protocol::BLOCK_WALL_SIGN) {
+    auto& sign = p.level->getOrCreateSign(px, py, pz);
+    sign.text1.clear();
+    sign.text2.clear();
+    sign.text3.clear();
+    sign.text4.clear();
+    // Creator: username (PM uses raw UUID; we use name for simple plugin/edit guard)
+    sign.creator = p.username;
+    sign.dirty = true;
+    broadcastBlockUpdate(p.level, px, py, pz, block_id, meta, nullptr);
+    auto bed = protocol::encodeBlockEntityData(
+        px, py, pz,
+        protocol::encodeSignSpawnNbt(px, py, pz, sign.text1, sign.text2, sign.text3, sign.text4));
+    players_->broadcastNear(static_cast<float>(px) + 0.5f, static_cast<float>(py) + 0.5f,
+                            static_cast<float>(pz) + 0.5f, 64.f, bed, p.level, nullptr);
+  } else if (block_id == protocol::BLOCK_HOPPER) {
+    auto& hop = p.level->getOrCreateHopper(px, py, pz);
+    hop.dirty = true;
+    broadcastBlockUpdate(p.level, px, py, pz, block_id, meta, nullptr);
+    auto bed = protocol::encodeBlockEntityData(px, py, pz, protocol::encodeHopperSpawnNbt(px, py, pz));
+    players_->broadcastNear(static_cast<float>(px) + 0.5f, static_cast<float>(py) + 0.5f,
+                            static_cast<float>(pz) + 0.5f, 64.f, bed, p.level, nullptr);
+  } else if (block_id == protocol::BLOCK_CHEST) {
     // PM Chest::place — pair with adjacent same-facing unpaired chest
     auto& self = p.level->getOrCreateChest(px, py, pz);
     // scan sides 2..5; skip axis matching our facing (PM)
@@ -253,6 +569,18 @@ void Server::placeBlock(player::Player& p, int x, int y, int z, std::uint8_t fac
     }
   } else {
     broadcastBlockUpdate(p.level, px, py, pz, block_id, meta, nullptr);
+  }
+
+  // Redstone components: recompute network after place
+  if (block_id == protocol::BLOCK_REDSTONE_WIRE || block_id == protocol::BLOCK_REDSTONE_BLOCK ||
+      block_id == protocol::BLOCK_REDSTONE_TORCH || block_id == protocol::BLOCK_UNLIT_REDSTONE_TORCH ||
+      block_id == protocol::BLOCK_LEVER || block_id == protocol::BLOCK_UNPOWERED_REPEATER ||
+      block_id == protocol::BLOCK_POWERED_REPEATER || block_id == protocol::BLOCK_UNPOWERED_COMPARATOR ||
+      block_id == protocol::BLOCK_POWERED_COMPARATOR ||
+      block_id == protocol::BLOCK_INACTIVE_REDSTONE_LAMP ||
+      block_id == protocol::BLOCK_ACTIVE_REDSTONE_LAMP ||
+      block_id == protocol::BLOCK_DAYLIGHT_SENSOR || block_id == protocol::BLOCK_HOPPER) {
+    recomputeAndBroadcastRedstone(p.level, px, py, pz, 16);
   }
 
   if (p.gamemode != 1) {
@@ -1003,9 +1331,271 @@ void Server::tickFurnaces() {
   // v0.4.14: furnace feature fully removed — no smelt tick / no UI push
 }
 
-void Server::tickEntities() {
-  auto moved = entities_.tick(1.f);
+namespace {
+// Try move 1 item from src slot into first fitting dest slot. Returns true if moved.
+bool tryMoveOneItem(std::vector<item::ItemStack>& src, std::vector<item::ItemStack>& dst) {
+  for (auto& s : src) {
+    if (s.empty()) continue;
+    for (auto& d : dst) {
+      if (d.empty()) {
+        d = item::ItemStack::of(s.id, 1, s.damage);
+        if (--s.count == 0) s = item::ItemStack::air();
+        return true;
+      }
+      if (d.sameType(s) && d.count < 64) {
+        ++d.count;
+        if (--s.count == 0) s = item::ItemStack::air();
+        return true;
+      }
+    }
+    // no room for this stack type; try next source slot
+  }
+  return false;
+}
+
+// Hopper facing from meta low 3 bits → neighbor offset for push
+void hopperFacingOffset(std::uint8_t meta, int& dx, int& dy, int& dz) {
+  dx = dy = dz = 0;
+  switch (meta & 0x7) {
+    case 0: dy = -1; break; // down
+    case 2: dz = -1; break; // north
+    case 3: dz = 1; break;  // south
+    case 4: dx = -1; break; // west
+    case 5: dx = 1; break;  // east
+    default: dy = -1; break;
+  }
+}
+} // namespace
+
+void Server::resyncOpenContainerAt(level::Level* level, int x, int y, int z) {
+  if (!players_ || !level) return;
+  for (auto& [_, pl] : players_->all()) {
+    if (!pl.spawned || pl.level != level || pl.open_window_id == 0 || pl.open_entity_eid != 0)
+      continue;
+    if (pl.open_chest_y != y) continue;
+    const bool at_primary = (pl.open_chest_x == x && pl.open_chest_z == z);
+    const bool at_pair =
+        pl.openChestPaired() && pl.open_pair_x == x && pl.open_pair_z == z;
+    if (!at_primary && !at_pair) continue;
+
+    if (pl.open_container_type == protocol::CONTAINER_TYPE_HOPPER) {
+      auto* hop = level->getHopper(pl.open_chest_x, pl.open_chest_y, pl.open_chest_z);
+      if (!hop) continue;
+      players_->sendPacket(pl, protocol::encodeContainerSetContent(pl.open_window_id, hop->slots),
+                           true);
+    } else if (pl.open_container_type == protocol::CONTAINER_TYPE_CHEST) {
+      auto* left = level->getChest(pl.open_chest_x, pl.open_chest_y, pl.open_chest_z);
+      if (!left) continue;
+      std::vector<item::ItemStack> contents = left->slots;
+      if (pl.openChestPaired()) {
+        auto* right = level->getChest(pl.open_pair_x, pl.open_chest_y, pl.open_pair_z);
+        if (right) {
+          contents.insert(contents.end(), right->slots.begin(), right->slots.end());
+        } else {
+          contents.resize(54, item::ItemStack::air());
+        }
+      }
+      players_->sendPacket(
+          pl, protocol::encodeContainerSetContent(pl.open_window_id, contents), true);
+    }
+  }
+}
+
+void Server::resyncOpenEntityContainer(std::int64_t eid) {
+  if (!players_ || eid == 0) return;
+  auto* e = entities_.get(eid);
+  if (!e || e->closed) return;
+  for (auto& [_, pl] : players_->all()) {
+    if (!pl.spawned || pl.open_window_id == 0 || pl.open_entity_eid != eid) continue;
+    players_->sendPacket(pl, protocol::encodeContainerSetContent(pl.open_window_id, e->cart_slots),
+                         true);
+  }
+}
+
+void Server::tickHoppers() {
   if (!players_) return;
+  for (auto& [_, lvl_ptr] : levels_.all()) {
+    auto* level = lvl_ptr.get();
+    if (!level) continue;
+    for (auto pos : level->hopperPositions()) {
+      const int x = std::get<0>(pos);
+      const int y = std::get<1>(pos);
+      const int z = std::get<2>(pos);
+      if (level->getBlockId(x, y, z) != protocol::BLOCK_HOPPER) continue;
+      // Auto-create tile if block exists but hoppers.dat missed it (old worlds / partial save)
+      auto* hop = level->getHopper(x, y, z);
+      if (!hop) hop = &level->getOrCreateHopper(x, y, z);
+      const auto meta = level->getBlockMeta(x, y, z);
+      // bit 0x8 = disabled by redstone (PE HopperBlock::isTurnedOn)
+      if (meta & 0x8) continue;
+
+      // PHP Hopper::onUpdate: pickupDroppedItems() even while TransferCooldown > 0;
+      // container pull/push only when cooldown is 0.
+      if (hop->cooldown > 0) --hop->cooldown;
+
+      bool moved = false;
+      int touch_ax = 0, touch_ay = -1, touch_az = 0; // adjacent container that changed
+
+      // Suck nearby item entities (Genisys AABB + slightly taller so items sitting on top
+      // of the hopper block at y+1.0 / falling from above still get absorbed).
+      // center=(x+0.5,y+0.5,z+0.5); xz ±0.75; y from block top-ish up to +1.6
+      {
+        const float min_x = static_cast<float>(x) + 0.5f - 0.75f;
+        const float max_x = static_cast<float>(x) + 0.5f + 0.75f;
+        const float min_y = static_cast<float>(y) + 0.25f;
+        const float max_y = static_cast<float>(y) + 1.6f;
+        const float min_z = static_cast<float>(z) + 0.5f - 0.75f;
+        const float max_z = static_cast<float>(z) + 0.5f + 0.75f;
+        for (auto& [__, e] : entities_.all()) {
+          if (e.closed || e.kind != entity::EntityKind::ItemDrop || e.level != level) continue;
+          if (e.pickup_delay > 0 || e.item_stack.empty()) continue;
+          if (e.x < min_x || e.x > max_x || e.y < min_y || e.y > max_y || e.z < min_z ||
+              e.z > max_z)
+            continue;
+          std::vector<item::ItemStack> tmp{e.item_stack};
+          // Absorb as many items as fit this tick (item entity may hold a stack)
+          bool absorbed_any = false;
+          while (!tmp[0].empty() && tryMoveOneItem(tmp, hop->slots)) absorbed_any = true;
+          if (!absorbed_any) continue;
+          hop->dirty = true;
+          moved = true;
+          if (tmp[0].empty()) {
+            // Despawn immediately so client drops vanish (same as player pickup)
+            auto rm = protocol::encodeRemoveEntity(e.eid);
+            for (auto& [___, pl] : players_->all()) {
+              if (pl.known_entities.erase(e.eid)) players_->sendPacket(pl, rm, true);
+            }
+            e.closed = true;
+          } else {
+            e.item_stack = tmp[0];
+            // Respawn with reduced count so clients refresh the stack size
+            auto rm = protocol::encodeRemoveEntity(e.eid);
+            for (auto& [___, pl] : players_->all()) {
+              if (pl.known_entities.erase(e.eid)) players_->sendPacket(pl, rm, true);
+            }
+            for (auto& [___, pl] : players_->all()) {
+              if (pl.spawned && pl.level == e.level) spawnEntityToPlayer(pl, e);
+            }
+          }
+          break; // one entity per transfer cycle (PE-ish)
+        }
+      }
+
+      // Container transfer only when cooldown cleared
+      if (hop->cooldown == 0) {
+        // 1) Pull from container above into hopper
+        // Always getOrCreate: chest/hopper tile may exist as block but not yet in .dat map.
+        if (!moved && y + 1 < 128) {
+          const auto above = level->getBlockId(x, y + 1, z);
+          if (above == protocol::BLOCK_CHEST) {
+            auto& chest = level->getOrCreateChest(x, y + 1, z);
+            if (tryMoveOneItem(chest.slots, hop->slots)) {
+              chest.dirty = true;
+              hop->dirty = true;
+              moved = true;
+              touch_ax = x;
+              touch_ay = y + 1;
+              touch_az = z;
+            }
+          } else if (above == protocol::BLOCK_HOPPER) {
+            auto& src = level->getOrCreateHopper(x, y + 1, z);
+            if (tryMoveOneItem(src.slots, hop->slots)) {
+              src.dirty = true;
+              hop->dirty = true;
+              moved = true;
+              touch_ax = x;
+              touch_ay = y + 1;
+              touch_az = z;
+            }
+          }
+        }
+
+        // 2) Push one item into facing container
+        if (!moved) {
+          int dx = 0, dy = 0, dz = 0;
+          hopperFacingOffset(meta, dx, dy, dz);
+          const int tx = x + dx, ty = y + dy, tz = z + dz;
+          if (ty >= 0 && ty < 128) {
+            const auto tid = level->getBlockId(tx, ty, tz);
+            if (tid == protocol::BLOCK_CHEST) {
+              auto& chest = level->getOrCreateChest(tx, ty, tz);
+              if (tryMoveOneItem(hop->slots, chest.slots)) {
+                hop->dirty = true;
+                chest.dirty = true;
+                moved = true;
+                touch_ax = tx;
+                touch_ay = ty;
+                touch_az = tz;
+              }
+            } else if (tid == protocol::BLOCK_HOPPER) {
+              auto& dst = level->getOrCreateHopper(tx, ty, tz);
+              if (tryMoveOneItem(hop->slots, dst.slots)) {
+                hop->dirty = true;
+                dst.dirty = true;
+                moved = true;
+                touch_ax = tx;
+                touch_ay = ty;
+                touch_az = tz;
+              }
+            }
+          }
+        }
+      }
+
+      if (moved) {
+        hop->cooldown = 8; // PE ~8 ticks between transfers
+        // Keep open UIs in sync (client otherwise keeps stale empty slots)
+        resyncOpenContainerAt(level, x, y, z);
+        if (touch_ay >= 0) resyncOpenContainerAt(level, touch_ax, touch_ay, touch_az);
+      }
+    }
+  }
+}
+
+void Server::tickEntities() {
+  if (!players_) return;
+
+  // Pre-tick: copy PlayerInput into linked minecarts BEFORE physics so idle carts
+  // can start from a full stop when the rider presses W.
+  for (auto& [_, e] : entities_.all()) {
+    if (e.closed || !entity::isMinecartKind(e.kind) || e.linked_eid == 0) continue;
+    player::Player* rider = nullptr;
+    for (auto& [__, pl] : players_->all()) {
+      if (pl.spawned && pl.entity_id == e.linked_eid && pl.level == e.level) {
+        rider = &pl;
+        break;
+      }
+    }
+    if (!rider) {
+      e.drive_forward = 0.f;
+      e.drive_strafe = 0.f;
+      e.drive_has_input = false;
+      continue;
+    }
+    if (rider->ride_sneaking) {
+      dismountPlayer(*rider);
+      continue;
+    }
+    e.yaw = rider->yaw; // direction choice only; never send look back to rider
+    e.drive_forward = rider->ride_input_y;
+    e.drive_strafe = rider->ride_input_x;
+    e.drive_has_input =
+        std::fabs(rider->ride_input_y) > 0.05f || std::fabs(rider->ride_input_x) > 0.05f;
+    if (e.drive_has_input && std::fabs(rider->ride_input_y) > 0.05f) {
+      e.motion_x =
+          -std::sin(rider->yaw * 3.14159265f / 180.f) * e.cart_speed * rider->ride_input_y;
+      e.motion_z =
+          std::cos(rider->yaw * 3.14159265f / 180.f) * e.cart_speed * rider->ride_input_y;
+    } else if (!e.drive_has_input) {
+      // damp residual so releasing W stops on normal rails
+      e.motion_x *= 0.85f;
+      e.motion_z *= 0.85f;
+      if (std::fabs(e.motion_x) < 0.02f) e.motion_x = 0.f;
+      if (std::fabs(e.motion_z) < 0.02f) e.motion_z = 0.f;
+    }
+  }
+
+  auto moved = entities_.tick(1.f);
 
   // despawn closed from clients
   for (auto& [id, e] : entities_.all()) {
@@ -1018,7 +1608,7 @@ void Server::tickEntities() {
     }
   }
 
-  // broadcast moves (mobs + item entities)
+  // broadcast moves (mobs + item entities + minecarts)
   for (auto* e : moved) {
     if (e->kind == entity::EntityKind::ItemDrop) {
       auto pk = protocol::encodeMoveEntity(e->eid, e->x, e->y, e->z, 0.f, 0.f, 0.f);
@@ -1029,9 +1619,212 @@ void Server::tickEntities() {
           protocol::encodeMoveEntity(e->eid, e->x, e->y, e->z, e->yaw, e->yaw, 0.f /*pitch*/);
       players_->broadcastNear(e->x, e->y, e->z, 64.f, pk, e->level, nullptr);
     }
+    // Keep rider position in sync with minecart (position only — never stomp look)
+    if (entity::isMinecartKind(e->kind) && e->linked_eid != 0) {
+      for (auto& [_, pl] : players_->all()) {
+        if (!pl.spawned || pl.entity_id != e->linked_eid || pl.level != e->level) continue;
+        pl.x = e->x;
+        pl.y = e->y + 0.5f;
+        pl.z = e->z;
+        pl.fall_distance_ = 0.f;
+        pl.on_ground_ = true;
+        // Viewers only: show rider body on cart. Do NOT send MovePlayer to self — that
+        // rubber-bands head yaw/pitch and makes looking around impossible while riding.
+        if (pl.entity_id != 0) {
+          auto mview = protocol::encodeMovePlayer(pl.entity_id, pl.x, pl.y, pl.z, pl.yaw, pl.yaw,
+                                                  pl.pitch, 0, true);
+          for (auto& [_, other] : players_->all()) {
+            if (!other.spawned || &other == &pl || other.level != pl.level) continue;
+            if (!other.known_players.count(pl.entity_id)) continue;
+            players_->sendPacket(other, mview, false);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // Also snap idle (unmoved) riders onto their cart each tick so they don't drift
+  for (auto& [_, e] : entities_.all()) {
+    if (e.closed || !entity::isMinecartKind(e.kind) || e.linked_eid == 0) continue;
+    bool already = false;
+    for (auto* m : moved) {
+      if (m == &e) {
+        already = true;
+        break;
+      }
+    }
+    if (already) continue;
+    for (auto& [_, pl] : players_->all()) {
+      if (!pl.spawned || pl.entity_id != e.linked_eid || pl.level != e.level) continue;
+      pl.x = e.x;
+      pl.y = e.y + 0.5f;
+      pl.z = e.z;
+      pl.fall_distance_ = 0.f;
+      pl.on_ground_ = true;
+      break;
+    }
   }
 
   tickItemPickups();
+
+  // Detector rail: power bit 0x8 while any minecart occupies the cell (PE-ish)
+  // Activator rail: prime TNT minecart fuse when powered
+  {
+    struct RailCell {
+      level::Level* level;
+      int x, y, z;
+      bool has_cart;
+      bool has_tnt;
+    };
+    std::vector<RailCell> cells;
+    auto findCell = [&](level::Level* lvl, int x, int y, int z) -> RailCell& {
+      for (auto& c : cells) {
+        if (c.level == lvl && c.x == x && c.y == y && c.z == z) return c;
+      }
+      cells.push_back({lvl, x, y, z, false, false});
+      return cells.back();
+    };
+    for (auto& [_, e] : entities_.all()) {
+      if (e.closed || !entity::isMinecartKind(e.kind) || !e.level) continue;
+      const int bx = static_cast<int>(std::floor(e.x));
+      const int by = static_cast<int>(std::floor(e.y + 0.1f));
+      const int bz = static_cast<int>(std::floor(e.z));
+      auto& cell = findCell(e.level, bx, by, bz);
+      cell.has_cart = true;
+      if (e.kind == entity::EntityKind::MinecartTNT) cell.has_tnt = true;
+
+      // Hopper minecart: pull from container above / suck items (cooldown 8)
+      if (e.kind == entity::EntityKind::MinecartHopper) {
+        if (e.cart_cooldown > 0) {
+          --e.cart_cooldown;
+        } else if (!e.cart_slots.empty()) {
+          bool moved = false;
+          int touch_ax = 0, touch_ay = -1, touch_az = 0;
+          if (by + 1 < 128) {
+            const auto above = e.level->getBlockId(bx, by + 1, bz);
+            if (above == protocol::BLOCK_CHEST) {
+              auto& chest = e.level->getOrCreateChest(bx, by + 1, bz);
+              if (tryMoveOneItem(chest.slots, e.cart_slots)) {
+                chest.dirty = true;
+                moved = true;
+                touch_ax = bx;
+                touch_ay = by + 1;
+                touch_az = bz;
+              }
+            } else if (above == protocol::BLOCK_HOPPER) {
+              auto& hop = e.level->getOrCreateHopper(bx, by + 1, bz);
+              if (tryMoveOneItem(hop.slots, e.cart_slots)) {
+                hop.dirty = true;
+                moved = true;
+                touch_ax = bx;
+                touch_ay = by + 1;
+                touch_az = bz;
+              }
+            }
+          }
+          if (!moved) {
+            for (auto& [__, it] : entities_.all()) {
+              if (it.closed || it.kind != entity::EntityKind::ItemDrop || it.level != e.level)
+                continue;
+              if (it.pickup_delay > 0 || it.item_stack.empty()) continue;
+              const float dx = it.x - e.x, dy = it.y - e.y, dz = it.z - e.z;
+              if (dx * dx + dy * dy + dz * dz > 1.5f * 1.5f) continue;
+              std::vector<item::ItemStack> tmp{it.item_stack};
+              bool absorbed = false;
+              while (!tmp[0].empty() && tryMoveOneItem(tmp, e.cart_slots)) absorbed = true;
+              if (!absorbed) continue;
+              if (tmp[0].empty()) {
+                auto rm = protocol::encodeRemoveEntity(it.eid);
+                for (auto& [___, pl] : players_->all()) {
+                  if (pl.known_entities.erase(it.eid)) players_->sendPacket(pl, rm, true);
+                }
+                it.closed = true;
+              } else {
+                it.item_stack = tmp[0];
+                auto rm = protocol::encodeRemoveEntity(it.eid);
+                for (auto& [___, pl] : players_->all()) {
+                  if (pl.known_entities.erase(it.eid)) players_->sendPacket(pl, rm, true);
+                }
+                for (auto& [___, pl] : players_->all()) {
+                  if (pl.spawned && pl.level == it.level) spawnEntityToPlayer(pl, it);
+                }
+              }
+              moved = true;
+              break;
+            }
+          }
+          if (moved) {
+            e.cart_cooldown = 8;
+            resyncOpenEntityContainer(e.eid);
+            if (touch_ay >= 0) resyncOpenContainerAt(e.level, touch_ax, touch_ay, touch_az);
+          }
+        }
+      }
+
+      // TNT minecart fuse countdown + simple explode (remove + drop nothing)
+      if (e.kind == entity::EntityKind::MinecartTNT && e.tnt_fuse >= 0) {
+        --e.tnt_fuse;
+        if (e.tnt_fuse <= 0) {
+          // crude blast: break soft blocks in r=2 and remove cart
+          for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -2; ox <= 2; ++ox) {
+              for (int oz = -2; oz <= 2; ++oz) {
+                if (ox * ox + oy * oy + oz * oz > 6) continue;
+                const int tx = bx + ox, ty = by + oy, tz = bz + oz;
+                if (ty < 0 || ty >= 128) continue;
+                const auto bid = e.level->getBlockId(tx, ty, tz);
+                if (bid == 0 || bid == protocol::BLOCK_BEDROCK || bid == protocol::BLOCK_OBSIDIAN)
+                  continue;
+                e.level->setBlock(tx, ty, tz, 0, 0);
+                broadcastBlockUpdate(e.level, tx, ty, tz, 0, 0, nullptr);
+              }
+            }
+          }
+          closeViewersOfEntity(e.eid);
+          if (e.linked_eid != 0) {
+            for (auto& [_, pl] : players_->all()) {
+              if (pl.entity_id == e.linked_eid) {
+                dismountPlayer(pl);
+                break;
+              }
+            }
+          }
+          auto pk = protocol::encodeRemoveEntity(e.eid);
+          for (auto& [_, pl] : players_->all()) {
+            if (pl.known_entities.erase(e.eid)) players_->sendPacket(pl, pk);
+          }
+          e.closed = true;
+          continue;
+        }
+      }
+    }
+
+    for (const auto& cell : cells) {
+      if (!cell.level) continue;
+      const auto rid = cell.level->getBlockId(cell.x, cell.y, cell.z);
+      const auto rmeta = cell.level->getBlockMeta(cell.x, cell.y, cell.z);
+      if (rid == protocol::BLOCK_DETECTOR_RAIL) {
+        const int base = rmeta & 0x7;
+        const auto nmeta = static_cast<std::uint8_t>(base | (cell.has_cart ? 0x8 : 0));
+        if (nmeta != rmeta) {
+          cell.level->setBlock(cell.x, cell.y, cell.z, rid, nmeta);
+          broadcastBlockUpdate(cell.level, cell.x, cell.y, cell.z, rid, nmeta, nullptr);
+          recomputeAndBroadcastRedstone(cell.level, cell.x, cell.y, cell.z, 12);
+        }
+      } else if (rid == protocol::BLOCK_ACTIVATOR_RAIL && (rmeta & 0x8) && cell.has_tnt) {
+        for (auto& [_, e] : entities_.all()) {
+          if (e.closed || e.kind != entity::EntityKind::MinecartTNT || e.level != cell.level)
+            continue;
+          if (e.tnt_fuse >= 0) continue;
+          const int ex = static_cast<int>(std::floor(e.x));
+          const int ey = static_cast<int>(std::floor(e.y + 0.1f));
+          const int ez = static_cast<int>(std::floor(e.z));
+          if (ex == cell.x && ey == cell.y && ez == cell.z) e.tnt_fuse = 80; // ~4s
+        }
+      }
+    }
+  }
 
   // ensure nearby players know entities
   if ((tick_counter_ % 20) == 0) {
@@ -1061,6 +1854,109 @@ std::optional<std::string> Server::checkBanned(const player::Player& p) const {
     return r->empty() ? std::string("Client banned") : ("Client banned: " + *r);
   }
   return std::nullopt;
+}
+
+void Server::installPluginHostAccess() {
+  plugin::PluginHostAccess acc;
+  acc.ctx = this;
+  acc.broadcast = hostBrBroadcast;
+  acc.send_message = hostBrSendMessage;
+  acc.player_count = hostBrPlayerCount;
+  acc.get_player_pos = hostBrGetPlayerPos;
+  acc.set_block = hostBrSetBlock;
+  acc.get_block = hostBrGetBlock;
+  acc.set_sign_text = hostBrSetSignText;
+  acc.kick_player = hostBrKickPlayer;
+  plugin::setPluginHostAccess(acc);
+}
+
+void Server::pluginHostBroadcast(const char* msg) {
+  if (!msg || !players_) return;
+  players_->broadcastText(msg);
+}
+
+int Server::pluginHostSendMessage(const char* username, const char* msg) {
+  if (!username || !msg || !players_) return 0;
+  auto* pl = findPlayerByName(username);
+  if (!pl) return 0;
+  players_->sendPacket(*pl, protocol::encodeTextSystem(msg), false);
+  return 1;
+}
+
+int Server::pluginHostPlayerCount() {
+  return players_ ? static_cast<int>(players_->count()) : 0;
+}
+
+int Server::pluginHostGetPlayerPos(const char* username, float* x, float* y, float* z,
+                                   char* world_out, int world_out_len) {
+  if (!username) return 0;
+  auto* pl = findPlayerByName(username);
+  if (!pl || !pl->spawned) return 0;
+  if (x) *x = pl->x;
+  if (y) *y = pl->y;
+  if (z) *z = pl->z;
+  if (world_out && world_out_len > 0) {
+    const std::string& w = pl->level ? pl->level->name() : std::string{};
+    const auto n = std::min(w.size(), static_cast<std::size_t>(world_out_len - 1));
+    if (n) std::memcpy(world_out, w.data(), n);
+    world_out[n] = '\0';
+  }
+  return 1;
+}
+
+int Server::pluginHostSetBlock(const char* world, int x, int y, int z, int id, int meta) {
+  level::Level* lvl = nullptr;
+  if (world && world[0]) lvl = levels_.get(world);
+  if (!lvl) lvl = levels_.defaultLevel();
+  if (!lvl) return 0;
+  if (y < 0 || y >= 128) return 0;
+  if (!lvl->setBlock(x, y, z, static_cast<std::uint8_t>(id & 0xff),
+                     static_cast<std::uint8_t>(meta & 0x0f))) {
+    return 0;
+  }
+  broadcastBlockUpdate(lvl, x, y, z, static_cast<std::uint8_t>(id & 0xff),
+                       static_cast<std::uint8_t>(meta & 0x0f), nullptr);
+  return 1;
+}
+
+int Server::pluginHostGetBlock(const char* world, int x, int y, int z) {
+  level::Level* lvl = nullptr;
+  if (world && world[0]) lvl = levels_.get(world);
+  if (!lvl) lvl = levels_.defaultLevel();
+  if (!lvl || y < 0 || y >= 128) return -1;
+  return static_cast<int>(lvl->getBlockId(x, y, z));
+}
+
+int Server::pluginHostSetSignText(const char* world, int x, int y, int z, const char* t1,
+                                  const char* t2, const char* t3, const char* t4) {
+  level::Level* lvl = nullptr;
+  if (world && world[0]) lvl = levels_.get(world);
+  if (!lvl) lvl = levels_.defaultLevel();
+  if (!lvl) return 0;
+  const auto bid = lvl->getBlockId(x, y, z);
+  if (bid != protocol::BLOCK_SIGN_POST && bid != protocol::BLOCK_WALL_SIGN) return 0;
+  auto& sign = lvl->getOrCreateSign(x, y, z);
+  sign.text1 = t1 ? t1 : "";
+  sign.text2 = t2 ? t2 : "";
+  sign.text3 = t3 ? t3 : "";
+  sign.text4 = t4 ? t4 : "";
+  sign.dirty = true;
+  if (players_) {
+    auto bed = protocol::encodeBlockEntityData(
+        x, y, z,
+        protocol::encodeSignSpawnNbt(x, y, z, sign.text1, sign.text2, sign.text3, sign.text4));
+    players_->broadcastNear(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
+                            static_cast<float>(z) + 0.5f, 64.f, bed, lvl, nullptr);
+  }
+  return 1;
+}
+
+int Server::pluginHostKickPlayer(const char* username, const char* reason) {
+  if (!username) return 0;
+  auto* pl = findPlayerByName(username);
+  if (!pl) return 0;
+  kickPlayer(*pl, reason ? reason : "Kicked by plugin");
+  return 1;
 }
 
 void Server::kickPlayer(player::Player& p, std::string_view reason) {
@@ -1877,6 +2773,23 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
   (void)args;
 }
 
+void Server::handlePlayerInput(player::Player& p, std::string_view buffer) {
+  auto in = protocol::decodePlayerInput(buffer);
+  if (!in.ok || !p.spawned) return;
+  p.ride_input_x = in.mot_x;
+  p.ride_input_y = in.mot_y;
+  p.ride_jumping = in.jumping;
+  p.ride_sneaking = in.sneaking;
+  // Jump / sneak while riding → leave minecart
+  if (p.riding_eid != 0 && (in.jumping || in.sneaking)) {
+    dismountPlayer(p);
+    p.ride_input_x = 0.f;
+    p.ride_input_y = 0.f;
+    p.ride_jumping = false;
+    p.ride_sneaking = false;
+  }
+}
+
 void Server::handleMove(player::Player& p, std::string_view buffer) {
   auto m = protocol::decodeMovePlayer(buffer);
   if (!m.ok || !p.spawned) return;
@@ -1884,6 +2797,22 @@ void Server::handleMove(player::Player& p, std::string_view buffer) {
 
   const float prev_y = p.y;
   const bool prev_ground = p.on_ground_;
+  // While riding: accept look only. Position is owned by the minecart tick.
+  if (p.riding_eid != 0) {
+    p.yaw = m.yaw;
+    p.pitch = m.pitch;
+    // still relay look to nearby players so others see head turn
+    if (players_ && p.entity_id != 0) {
+      auto mp = protocol::encodeMovePlayer(p.entity_id, p.x, p.y, p.z, p.yaw, p.yaw, p.pitch, 0,
+                                           true);
+      for (auto& [_, other] : players_->all()) {
+        if (!other.spawned || &other == &p || other.level != p.level) continue;
+        if (!other.known_players.count(p.entity_id)) continue;
+        players_->sendPacket(other, mp, false);
+      }
+    }
+    return;
+  }
   p.x = m.x;
   p.y = m.y;
   p.z = m.z;
@@ -1978,7 +2907,92 @@ void Server::handlePlayerAction(player::Player& p, std::string_view buffer) {
     if (!held.empty()) playerThrowHeld(p, held, false);
   } else if (a.action == protocol::ACTION_RESPAWN) {
     if (p.death_ticks_ >= 0 || p.health <= 0) respawnPlayer(p);
+  } else if (a.action == protocol::ACTION_JUMP || a.action == protocol::ACTION_START_SNEAK) {
+    // Jump / sneak → leave minecart (PE vehicle dismount)
+    if (p.riding_eid != 0) dismountPlayer(p);
   }
+}
+
+void Server::handleBlockEntityData(player::Player& p, std::string_view buffer) {
+  if (!p.spawned || !p.level) return;
+  protocol::BlockEntityDataPacket pk;
+  if (!protocol::decodeBlockEntityData(buffer, pk)) return;
+
+  // distance guard (PM: distanceSquared > 10000)
+  const float dx = static_cast<float>(pk.x) + 0.5f - p.x;
+  const float dy = static_cast<float>(pk.y) + 0.5f - p.y;
+  const float dz = static_cast<float>(pk.z) + 0.5f - p.z;
+  if (dx * dx + dy * dy + dz * dz > 10000.f) return;
+
+  const auto bid = p.level->getBlockId(pk.x, pk.y, pk.z);
+  if (bid != protocol::BLOCK_SIGN_POST && bid != protocol::BLOCK_WALL_SIGN) return;
+
+  auto* sign = p.level->getSign(pk.x, pk.y, pk.z);
+  if (!sign) sign = &p.level->getOrCreateSign(pk.x, pk.y, pk.z);
+
+  auto nbt = protocol::decodeSignNbtLe(pk.namedtag);
+  auto resend = [&]() {
+    auto bed = protocol::encodeBlockEntityData(
+        pk.x, pk.y, pk.z,
+        protocol::encodeSignSpawnNbt(pk.x, pk.y, pk.z, sign->text1, sign->text2, sign->text3,
+                                     sign->text4));
+    players_->sendPacket(p, bed, false);
+  };
+  if (!nbt.ok || (!nbt.id.empty() && nbt.id != "Sign")) {
+    resend();
+    return;
+  }
+
+  // PM: only creator may edit; also reject lines > 16 UTF-8 code points (approx by bytes for now)
+  auto utf8Len = [](std::string_view s) -> std::size_t {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size();) {
+      unsigned char c = static_cast<unsigned char>(s[i]);
+      if ((c & 0x80) == 0) i += 1;
+      else if ((c & 0xe0) == 0xc0) i += 2;
+      else if ((c & 0xf0) == 0xe0) i += 3;
+      else if ((c & 0xf8) == 0xf0) i += 4;
+      else i += 1;
+      ++n;
+    }
+    return n;
+  };
+
+  bool cancel = false;
+  if (!sign->creator.empty() && sign->creator != p.username) cancel = true;
+  if (utf8Len(nbt.text1) > 16 || utf8Len(nbt.text2) > 16 || utf8Len(nbt.text3) > 16 ||
+      utf8Len(nbt.text4) > 16) {
+    cancel = true;
+  }
+
+  plugin::SignChangeEvent sev;
+  sev.username = p.username;
+  sev.x = pk.x;
+  sev.y = pk.y;
+  sev.z = pk.z;
+  sev.text1 = nbt.text1;
+  sev.text2 = nbt.text2;
+  sev.text3 = nbt.text3;
+  sev.text4 = nbt.text4;
+  sev.cancelled = cancel;
+  plugins_.fireSignChange(sev);
+  if (sev.cancelled) {
+    resend();
+    return;
+  }
+
+  sign->text1 = std::move(sev.text1);
+  sign->text2 = std::move(sev.text2);
+  sign->text3 = std::move(sev.text3);
+  sign->text4 = std::move(sev.text4);
+  sign->dirty = true;
+
+  auto bed = protocol::encodeBlockEntityData(
+      pk.x, pk.y, pk.z,
+      protocol::encodeSignSpawnNbt(pk.x, pk.y, pk.z, sign->text1, sign->text2, sign->text3,
+                                   sign->text4));
+  players_->broadcastNear(static_cast<float>(pk.x) + 0.5f, static_cast<float>(pk.y) + 0.5f,
+                          static_cast<float>(pk.z) + 0.5f, 64.f, bed, p.level, nullptr);
 }
 
 void Server::handleDropItem(player::Player& p, std::string_view buffer) {
@@ -2070,6 +3084,7 @@ void Server::openChest(player::Player& p, int x, int y, int z) {
 
   p.open_window_id = wid;
   p.open_container_type = protocol::CONTAINER_TYPE_CHEST;
+  p.open_entity_eid = 0;
   p.open_chest_x = left_x;
   p.open_chest_y = y;
   p.open_chest_z = left_z;
@@ -2132,11 +3147,103 @@ void Server::openFurnace(player::Player& p, int x, int y, int z) {
   }
 }
 
+void Server::openHopper(player::Player& p, int x, int y, int z) {
+  if (!p.level || !p.spawned) return;
+  if (p.level->getBlockId(x, y, z) != protocol::BLOCK_HOPPER) return;
+
+  if (p.open_window_id != 0 && p.open_container_type == protocol::CONTAINER_TYPE_HOPPER &&
+      p.open_chest_x == x && p.open_chest_y == y && p.open_chest_z == z) {
+    return;
+  }
+  if (p.open_window_id != 0) closeContainer(p, true);
+
+  auto& hop = p.level->getOrCreateHopper(x, y, z);
+  const std::uint8_t wid = nextDynamicWindowId();
+  p.open_window_id = wid;
+  p.open_container_type = protocol::CONTAINER_TYPE_HOPPER;
+  p.open_entity_eid = 0;
+  p.open_chest_x = x;
+  p.open_chest_y = y;
+  p.open_chest_z = z;
+  p.open_pair_x = static_cast<int>(0x80000000);
+  p.open_pair_z = static_cast<int>(0x80000000);
+
+  players_->sendPacket(
+      p, protocol::encodeBlockEntityData(x, y, z, protocol::encodeHopperSpawnNbt(x, y, z)), true);
+  players_->sendPacket(
+      p,
+      protocol::encodeContainerOpen(wid, protocol::CONTAINER_TYPE_HOPPER, 5, x, y, z, -1),
+      true);
+  players_->sendPacket(p, protocol::encodeContainerSetContent(wid, hop.slots), true);
+
+  util::Logger::instance().info("openHopper ", p.username, " wid=", static_cast<int>(wid), " @",
+                                x, ",", y, ",", z);
+}
+
+void Server::openMinecartContainer(player::Player& p, entity::Entity& e) {
+  if (!p.spawned || !p.level || e.closed || e.level != p.level) return;
+  if (e.kind != entity::EntityKind::MinecartChest &&
+      e.kind != entity::EntityKind::MinecartHopper) {
+    return;
+  }
+  // Ensure inventory capacity (spawn should already set this)
+  if (e.kind == entity::EntityKind::MinecartChest && e.cart_slots.size() != 27) {
+    e.cart_slots.assign(27, item::ItemStack::air());
+  } else if (e.kind == entity::EntityKind::MinecartHopper && e.cart_slots.size() != 5) {
+    e.cart_slots.assign(5, item::ItemStack::air());
+  }
+  if (e.cart_slots.empty()) return;
+
+  // Already viewing this cart — ignore spam
+  if (p.open_window_id != 0 && p.open_entity_eid == e.eid) return;
+  if (p.open_window_id != 0) closeContainer(p, true);
+
+  // Cannot ride and browse at once; hop off first
+  if (p.riding_eid != 0) dismountPlayer(p);
+
+  const bool is_hopper = (e.kind == entity::EntityKind::MinecartHopper);
+  const std::uint8_t ctype =
+      is_hopper ? protocol::CONTAINER_TYPE_HOPPER : protocol::CONTAINER_TYPE_CHEST;
+  const std::int16_t nslots = static_cast<std::int16_t>(e.cart_slots.size());
+  const std::uint8_t wid = nextDynamicWindowId();
+
+  p.open_window_id = wid;
+  p.open_container_type = ctype;
+  p.open_entity_eid = e.eid;
+  // Keep block coords as cart floor for any distance/debug paths
+  p.open_chest_x = static_cast<int>(std::floor(e.x));
+  p.open_chest_y = static_cast<int>(std::floor(e.y));
+  p.open_chest_z = static_cast<int>(std::floor(e.z));
+  p.open_pair_x = static_cast<int>(0x80000000);
+  p.open_pair_z = static_cast<int>(0x80000000);
+
+  // Entity-linked ContainerOpen: x/y/z unused when entity_id is set (PE 0.14)
+  players_->sendPacket(
+      p,
+      protocol::encodeContainerOpen(wid, ctype, nslots, 0, 0, 0, e.eid),
+      true);
+  players_->sendPacket(p, protocol::encodeContainerSetContent(wid, e.cart_slots), true);
+
+  util::Logger::instance().info(
+      "openMinecartContainer ", p.username, " wid=", static_cast<int>(wid),
+      " eid=", e.eid, " kind=", entity::kindName(e.kind), " slots=", static_cast<int>(nslots));
+}
+
+void Server::closeViewersOfEntity(std::int64_t eid) {
+  if (eid == 0 || !players_) return;
+  for (auto& [_, pl] : players_->all()) {
+    if (pl.open_window_id != 0 && pl.open_entity_eid == eid) {
+      closeContainer(pl, true);
+    }
+  }
+}
+
 void Server::closeContainer(player::Player& p, bool send_close_pk) {
   if (p.open_window_id == 0) return;
   const int cx = p.open_chest_x, cy = p.open_chest_y, cz = p.open_chest_z;
   const int px = p.open_pair_x, pz = p.open_pair_z;
   const auto ctype = p.open_container_type;
+  const bool was_entity = p.open_entity_eid != 0;
   if (send_close_pk) {
     players_->sendPacket(p, protocol::encodeContainerClose(p.open_window_id), false);
   }
@@ -2145,8 +3252,9 @@ void Server::closeContainer(player::Player& p, bool send_close_pk) {
   p.open_chest_y = -1;
   p.open_pair_x = static_cast<int>(0x80000000);
   p.open_pair_z = static_cast<int>(0x80000000);
-  // chest lid close (left + right if double)
-  if (ctype == protocol::CONTAINER_TYPE_CHEST && p.level && cy >= 0) {
+  p.open_entity_eid = 0;
+  // chest lid close (left + right if double) — block chests only
+  if (!was_entity && ctype == protocol::CONTAINER_TYPE_CHEST && p.level && cy >= 0) {
     broadcastChestLid(p.level, cx, cy, cz, false);
     if (px != static_cast<int>(0x80000000)) {
       broadcastChestLid(p.level, px, cy, pz, false);
@@ -2172,15 +3280,48 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
   // face 0xff = air click / eat etc
   if (u.face == 0xff) return;
 
-  // Right-click container blocks → open UI (PM onActivate)
+  // Right-click container / redstone activate (PM onActivate)
   if (p.level) {
     const auto bid = p.level->getBlockId(u.x, u.y, u.z);
     if (bid == protocol::BLOCK_CHEST) {
       openChest(p, u.x, u.y, u.z);
       return;
     }
+    if (bid == protocol::BLOCK_HOPPER) {
+      openHopper(p, u.x, u.y, u.z);
+      return;
+    }
     if (bid == protocol::BLOCK_FURNACE || bid == protocol::BLOCK_BURNING_FURNACE) {
       openFurnace(p, u.x, u.y, u.z);
+      return;
+    }
+    // Lever toggle
+    if (bid == protocol::BLOCK_LEVER) {
+      const auto meta = p.level->getBlockMeta(u.x, u.y, u.z);
+      const auto nmeta = block::leverToggleMeta(meta);
+      p.level->setBlock(u.x, u.y, u.z, protocol::BLOCK_LEVER, nmeta);
+      broadcastBlockUpdate(p.level, u.x, u.y, u.z, protocol::BLOCK_LEVER, nmeta, nullptr);
+      recomputeAndBroadcastRedstone(p.level, u.x, u.y, u.z, 16);
+      return;
+    }
+    // Repeater: cycle delay (meta += 4) on right-click
+    if (bid == protocol::BLOCK_UNPOWERED_REPEATER || bid == protocol::BLOCK_POWERED_REPEATER) {
+      auto meta = p.level->getBlockMeta(u.x, u.y, u.z);
+      const auto facing = meta % 4;
+      const auto delay = ((meta - facing) / 4 + 1) % 4;
+      meta = static_cast<std::uint8_t>(facing + delay * 4);
+      p.level->setBlock(u.x, u.y, u.z, bid, meta);
+      broadcastBlockUpdate(p.level, u.x, u.y, u.z, bid, meta, nullptr);
+      recomputeAndBroadcastRedstone(p.level, u.x, u.y, u.z, 12);
+      return;
+    }
+    // Comparator: toggle subtract mode bit 0x4 (facing preserved)
+    if (bid == protocol::BLOCK_UNPOWERED_COMPARATOR || bid == protocol::BLOCK_POWERED_COMPARATOR) {
+      auto meta = p.level->getBlockMeta(u.x, u.y, u.z);
+      meta = static_cast<std::uint8_t>(meta ^ 0x04);
+      p.level->setBlock(u.x, u.y, u.z, bid, meta);
+      broadcastBlockUpdate(p.level, u.x, u.y, u.z, bid, meta, nullptr);
+      recomputeAndBroadcastRedstone(p.level, u.x, u.y, u.z, 12);
       return;
     }
 
@@ -2254,11 +3395,11 @@ void Server::handleMobEquipment(player::Player& p, std::string_view buffer) {
       players_->sendInventory(p);
       return;
     }
-    // Allow empty (clear) or any creative-palette / free-form creative item
+    // Sanitize: corrupt id/count/NBT from creative click can crash PE 0.14 on later resync
     p.selected_hotbar = selected;
     p.hotbar_link[static_cast<std::size_t>(selected)] = selected;
     p.inventory[static_cast<std::size_t>(selected)] =
-        e.item.empty() ? item::ItemStack::air() : e.item;
+        e.item.empty() ? item::ItemStack::air() : item::sanitizeSlot(e.item);
     // Do NOT full-resync here: client already shows the pick; resync breaks empty-cell take
     return;
   }
@@ -2295,15 +3436,19 @@ item::ItemStack getPlayerSlot(const player::Player& p, std::uint8_t window_id, s
 
 void setPlayerSlot(player::Player& p, std::uint8_t window_id, std::int16_t slot,
                    const item::ItemStack& item) {
+  // Always sanitize before write — creative SetSlot / MobEquipment can carry junk that
+  // later crashes PE 0.14 when ContainerSetContent echoes inventory.
+  const item::ItemStack clean =
+      item.empty() ? item::ItemStack::air() : item::sanitizeSlot(item);
   if (window_id == protocol::WINDOW_INVENTORY) {
     if (slot < 0 || slot >= static_cast<std::int16_t>(p.inventory.size())) return;
-    p.inventory[static_cast<std::size_t>(slot)] = item.empty() ? item::ItemStack::air() : item;
+    p.inventory[static_cast<std::size_t>(slot)] = clean;
     return;
   }
   if (window_id == protocol::WINDOW_ARMOR) {
     if (p.armor.size() < 4) p.armor.assign(4, item::ItemStack::air());
     if (slot < 0 || slot >= 4) return;
-    p.armor[static_cast<std::size_t>(slot)] = item.empty() ? item::ItemStack::air() : item;
+    p.armor[static_cast<std::size_t>(slot)] = clean;
   }
 }
 
@@ -2374,8 +3519,25 @@ void Server::handleContainerSetSlot(player::Player& p, std::string_view buffer) 
   }
 
   // Dynamic container window: client UI authority while open
-  if (p.open_window_id != 0 && d.window_id == p.open_window_id && p.level &&
-      p.open_chest_y >= 0) {
+  if (p.open_window_id != 0 && d.window_id == p.open_window_id) {
+    // Chest / hopper minecart inventory (entity-linked)
+    if (p.open_entity_eid != 0) {
+      auto* cart = entities_.get(p.open_entity_eid);
+      if (!cart || cart->closed || cart->level != p.level ||
+          (cart->kind != entity::EntityKind::MinecartChest &&
+           cart->kind != entity::EntityKind::MinecartHopper)) {
+        closeContainer(p, true);
+        return;
+      }
+      if (d.slot >= 0 && d.slot < static_cast<std::int16_t>(cart->cart_slots.size())) {
+        cart->cart_slots[static_cast<std::size_t>(d.slot)] =
+            d.item.empty() ? item::ItemStack::air() : item::sanitizeSlot(d.item);
+      }
+      return;
+    }
+
+    if (!p.level || p.open_chest_y < 0) return;
+
     if (p.open_container_type == protocol::CONTAINER_TYPE_FURNACE) {
       auto* fur = p.level->getFurnace(p.open_chest_x, p.open_chest_y, p.open_chest_z);
       if (!fur) fur = &p.level->getOrCreateFurnace(p.open_chest_x, p.open_chest_y, p.open_chest_z);
@@ -2386,6 +3548,14 @@ void Server::handleContainerSetSlot(player::Player& p, std::string_view buffer) 
         // Never set need_push_slots here (echo SetSlot crashes some 0.14 clients).
         fur->dirty = true;
         fur->need_push_slots = false;
+      }
+    } else if (p.open_container_type == protocol::CONTAINER_TYPE_HOPPER) {
+      auto* hop = p.level->getHopper(p.open_chest_x, p.open_chest_y, p.open_chest_z);
+      if (!hop) hop = &p.level->getOrCreateHopper(p.open_chest_x, p.open_chest_y, p.open_chest_z);
+      if (d.slot >= 0 && d.slot < static_cast<std::int16_t>(hop->slots.size())) {
+        hop->slots[static_cast<std::size_t>(d.slot)] =
+            d.item.empty() ? item::ItemStack::air() : item::sanitizeSlot(d.item);
+        hop->dirty = true;
       }
     } else {
       // chest / double chest: open_chest_* = left half; slots 0..26 left, 27..53 right
@@ -2477,7 +3647,8 @@ void Server::handleContainerSetSlot(player::Player& p, std::string_view buffer) 
   // Creative single-slot write: allow free set without balanced pair
   // (empty cell take from creative often arrives as one SetSlot after MobEquipment)
   if (p.gamemode == 1 && p.pending_txs.size() == 1) {
-    setPlayerSlot(p, d.window_id, d.slot, target);
+    setPlayerSlot(p, d.window_id, d.slot,
+                  target.empty() ? item::ItemStack::air() : item::sanitizeSlot(target));
     p.pending_txs.clear();
     p.pending_tx_time = 0;
     return;
@@ -2592,9 +3763,43 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
   const float reach = (p.gamemode == 1) ? 8.f : 6.f;
   if (dist2 > reach * reach) return;
 
-  // Right-click: sheep shear with shears (PM Sheep::shear) — mobs only
+  // Right-click: open chest/hopper minecart inventory, or mount normal/TNT cart / shear sheep
   if (i.action == 1) {
-    if (!e || e->kind != entity::EntityKind::Sheep || e->sheared) return;
+    if (!e) return;
+    if (entity::isMinecartKind(e->kind)) {
+      // Already riding this cart → dismount
+      if (p.riding_eid == e->eid) {
+        dismountPlayer(p);
+        return;
+      }
+      // Chest / hopper minecart: open inventory (vanilla PE / Java behaviour)
+      if (e->kind == entity::EntityKind::MinecartChest ||
+          e->kind == entity::EntityKind::MinecartHopper) {
+        openMinecartContainer(p, *e);
+        return;
+      }
+      // Normal / TNT minecart: mount
+      if (p.riding_eid != 0) dismountPlayer(p);
+      if (e->linked_eid != 0 && e->linked_eid != p.entity_id) return; // occupied
+      e->linked_eid = p.entity_id;
+      e->linked_type = 1;
+      p.riding_eid = e->eid;
+      p.ride_input_x = 0.f;
+      p.ride_input_y = 0.f;
+      p.ride_jumping = false;
+      p.ride_sneaking = false;
+      // Do not seed auto-forward from look — wait for PlayerInput / powered rail.
+      e->motion_x = 0.f;
+      e->motion_z = 0.f;
+      e->drive_forward = 0.f;
+      e->drive_strafe = 0.f;
+      e->drive_has_input = false;
+      e->yaw = p.yaw;
+      // type 2 = passenger link (PM setLinked case 1)
+      broadcastEntityLink(e->level, e->eid, p.entity_id, 2, &p);
+      return;
+    }
+    if (e->kind != entity::EntityKind::Sheep || e->sheared) return;
     auto& held = p.heldItem();
     if (held.id != item::ids::SHEARS) return;
 
@@ -2620,6 +3825,35 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
 
   // Only left-click damages — right-click must NOT despawn mobs.
   if (i.action != 2) return;
+
+  // Attack minecart: break and drop matching item (+ contents for hopper/chest)
+  if (e && entity::isMinecartKind(e->kind)) {
+    if (e->linked_eid != 0) {
+      for (auto& [_, pl] : players_->all()) {
+        if (pl.entity_id == e->linked_eid) {
+          dismountPlayer(pl);
+          break;
+        }
+      }
+    }
+    closeViewersOfEntity(e->eid);
+    std::int16_t drop_id = item::ids::MINECART;
+    if (e->kind == entity::EntityKind::MinecartHopper) drop_id = item::ids::MINECART_HOPPER;
+    else if (e->kind == entity::EntityKind::MinecartTNT) drop_id = item::ids::MINECART_TNT;
+    else if (e->kind == entity::EntityKind::MinecartChest) drop_id = item::ids::MINECART_CHEST;
+    dropItemInWorld(e->level, e->x, e->y + 0.3f, e->z, item::ItemStack::of(drop_id), 0.f, 0.15f,
+                    0.f, 5);
+    for (auto& slot : e->cart_slots) {
+      if (slot.empty()) continue;
+      dropItemInWorld(e->level, e->x, e->y + 0.4f, e->z, slot, 0.f, 0.15f, 0.f, 5);
+    }
+    auto pk = protocol::encodeRemoveEntity(e->eid);
+    for (auto& [_, pl] : players_->all()) {
+      if (pl.known_entities.erase(e->eid)) players_->sendPacket(pl, pk);
+    }
+    entities_.remove(e->eid);
+    return;
+  }
 
   // basic weapon damage table (PM subset)
   float dmg = 1.f;
@@ -2780,6 +4014,9 @@ void Server::dispatchMcpePacket(player::Player& p, std::string_view buffer) {
     case protocol::MOVE_PLAYER_PACKET:
       handleMove(p, buffer);
       break;
+    case protocol::PLAYER_INPUT_PACKET:
+      handlePlayerInput(p, buffer);
+      break;
     case protocol::REQUEST_CHUNK_RADIUS_PACKET:
       handleChunkRadius(p, buffer);
       break;
@@ -2809,6 +4046,9 @@ void Server::dispatchMcpePacket(player::Player& p, std::string_view buffer) {
       break;
     case protocol::DROP_ITEM_PACKET:
       handleDropItem(p, buffer);
+      break;
+    case protocol::BLOCK_ENTITY_DATA_PACKET:
+      handleBlockEntityData(p, buffer);
       break;
     case protocol::ANIMATE_PACKET:
       handleAnimate(p, buffer);
@@ -3025,6 +4265,7 @@ void Server::start() {
 
   running_ = true;
   g_server = this;
+  installPluginHostAccess();
   std::signal(SIGINT, onSignal);
   std::signal(SIGTERM, onSignal);
 
@@ -3080,6 +4321,7 @@ void Server::networkThreadMain() {
 
 void Server::stop() {
   if (!running_.exchange(false)) return;
+  plugin::setPluginHostAccess({});
   util::Logger::instance().notice("Stopping...");
   if (console_thread_.joinable()) {
     // wake console reader by closing stdin is hard; thread exits on running_ false after next line
@@ -3111,6 +4353,8 @@ void Server::runLoop() {
       processConsoleQueue();
       levels_.tickAll();
       tickFurnaces();
+      tickRedstoneSchedules();
+      tickHoppers();
       tickEntities();
       tickPlayerPortals();
       tickPlayerDamage();

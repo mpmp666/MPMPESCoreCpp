@@ -76,6 +76,10 @@ void mpmpes_on_player_join(const MpmpesEventPlayerJoin* ev) {
              ev->username ? ev->username : "?");
     g_host->broadcast(b2);
   }
+  /* API v3: welcome DM */
+  if (g_host->send_message && ev->username) {
+    g_host->send_message(ev->username, "Welcome! (HelloC API v3)");
+  }
 }
 
 void mpmpes_on_player_quit(const MpmpesEventPlayerQuit* ev) {
@@ -113,4 +117,16 @@ void mpmpes_on_world_load(const MpmpesEventWorldLoad* ev) {
   snprintf(buf, sizeof(buf), "HelloC: world_load %s gen=%d seed=%d",
            ev->name ? ev->name : "?", (int)ev->generator, (int)ev->seed);
   g_host->log_info(buf);
+}
+
+void mpmpes_on_sign_change(MpmpesEventSignChange* ev) {
+  if (!g_host || !g_host->log_info || !ev) return;
+  char buf[512];
+  snprintf(buf, sizeof(buf), "HelloC: sign_change %s @ %d,%d,%d |%s|%s|%s|%s|",
+           ev->username ? ev->username : "?", (int)ev->x, (int)ev->y, (int)ev->z,
+           ev->line1 ? ev->line1 : "", ev->line2 ? ev->line2 : "",
+           ev->line3 ? ev->line3 : "", ev->line4 ? ev->line4 : "");
+  g_host->log_info(buf);
+  /* Example: prefix first line with [C] if empty rewrite not needed */
+  (void)ev;
 }

@@ -161,6 +161,45 @@ public:
   void loadFurnaces();
   std::string furnacePath() const;
 
+  // Hopper inventories: 5 slots (PE 0.14 HopperBlockEntity)
+  // meta: low 3 bits = facing (0 down, 2 N, 3 S, 4 W, 5 E); bit 0x8 = disabled by redstone
+  struct HopperInv {
+    int x = 0, y = 0, z = 0;
+    std::vector<item::ItemStack> slots; // 5
+    int cooldown = 0; // ticks until next transfer (PE ~8)
+    bool dirty = false;
+  };
+  HopperInv& getOrCreateHopper(int x, int y, int z);
+  HopperInv* getHopper(int x, int y, int z);
+  void removeHopper(int x, int y, int z);
+  void saveHoppers();
+  void loadHoppers();
+  std::string hopperPath() const;
+  // Snapshot hoppers in a chunk column (for BlockEntityData after FullChunkData).
+  std::vector<HopperInv> hoppersInChunk(int cx, int cz) const;
+  std::vector<std::tuple<int, int, int>> hopperPositions() const {
+    std::lock_guard lock(mu_);
+    std::vector<std::tuple<int, int, int>> out;
+    out.reserve(hoppers_.size());
+    for (const auto& [_, h] : hoppers_) out.emplace_back(h.x, h.y, h.z);
+    return out;
+  }
+
+  // Sign tiles (PM tile/Sign: Text1..Text4 + Creator)
+  struct SignTile {
+    int x = 0, y = 0, z = 0;
+    std::string text1, text2, text3, text4;
+    std::string creator; // player uuid/name who placed; empty = no edit guard
+    bool dirty = false;
+  };
+  SignTile& getOrCreateSign(int x, int y, int z);
+  SignTile* getSign(int x, int y, int z);
+  void removeSign(int x, int y, int z);
+  void saveSigns();
+  void loadSigns();
+  std::string signPath() const;
+  std::vector<SignTile> signsInChunk(int cx, int cz) const;
+
 private:
   Chunk generate(int cx, int cz) const;
   static std::int64_t blockPosKey(int x, int y, int z) {
@@ -177,6 +216,8 @@ private:
   std::string data_path_; // worlds/<name>
   std::unordered_map<std::int64_t, ChestInv> chests_;
   std::unordered_map<std::int64_t, FurnaceInv> furnaces_;
+  std::unordered_map<std::int64_t, HopperInv> hoppers_;
+  std::unordered_map<std::int64_t, SignTile> signs_;
 };
 
 class LevelManager {
@@ -191,7 +232,7 @@ public:
 
   void tickAll();
 
-  // Save all worlds (dirty chunks + chests). Returns total chunks written.
+  // Save all worlds (dirty chunks + chests/furnaces/signs). Returns total chunks written.
   int saveAll(bool force_all = false);
 
   // Load simple worlds list: name:type:seed per line in worlds.txt (optional)

@@ -332,12 +332,15 @@ void PlayerManager::sendInventory(Player& p) {
 
 void PlayerManager::sendCreativeContents(Player& p) {
   auto raw = item::creativeItems();
-  // Drop only true air — keep SPAWN_EGG (restored). Never pad with empty slots.
+  // Sanitize + drop air. Also strip ids known to hard-crash some PE 0.14 clients when
+  // clicked from creative palette (block forms that should be item forms only).
   std::vector<item::ItemStack> items;
   items.reserve(raw.size());
   for (auto s : raw) {
     s = item::sanitizeSlot(s);
     if (s.empty()) continue;
+    // Never expose block-form hopper/comparator in creative window
+    if (s.id == 154 || s.id == 149) continue;
     items.push_back(s);
   }
   sendPacket(p, protocol::encodeContainerSetContent(protocol::WINDOW_CREATIVE, items), true);
