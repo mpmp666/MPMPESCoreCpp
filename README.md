@@ -5,6 +5,7 @@
 - 目标：兼容 Minecraft: 基岩版 **0.14.x**（协议 **70**，与 PHP 版 `MPMPESCore` 一致）
 - 来源：`~/MPMPESCore`（Genisys / PocketMine-MP 分支）
 - 许可：与上游一致，LGPL-3.0（衍生）
+- 此代码100%AI生成 请勿找茬
 
 ## 状态（v0.5 — dig/place + 创造 + 合成 + 生物 AI + 铁轨/红石 + 漏斗/矿车容器）
 
