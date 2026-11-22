@@ -39,6 +39,12 @@ struct Player {
   float yaw = 0, pitch = 0;
   int gamemode = 0; // overwritten by server.properties / players.dat on login
   int health = 20;
+  float food = 20.f;          // hunger 0..20 (PM "Hunger" short)
+  float saturation = 5.f;
+  float exhaustion = 0.f;
+  std::int64_t xp_total = 0;
+  int xp_level = 0;
+  float xp_progress = 0.f;    // 0..1 progress into current level
   int chunk_radius = 4;
   bool spawned = false;
   int selected_hotbar = 0; // 0-8

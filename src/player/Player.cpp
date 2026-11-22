@@ -11,7 +11,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <chrono>
 #include <filesystem>
+#include <sstream>
 #include <fstream>
 #include <zlib.h>
 
@@ -144,55 +146,85 @@ bool PlayerManager::savePlayer(const Player& p) const {
   std::error_code ec;
   fs::create_directories(players_data_path_, ec);
   const auto path = players_data_path_ + "/" + playerFileName(p.username);
+  using nbt::Tag;
+  auto root = Tag::Compound();
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch()).count();
+  // keep firstPlayed across saves
+  {
+    std::ifstream old(path, std::ios::binary);
+    if (old) {
+      std::stringstream ss;
+      ss << old.rdbuf();
+      if (auto oldNbt = nbt::readCompressed(ss.str(), nbt::Endian::Big)) {
+        root->set("firstPlayed", Tag::Long(oldNbt->getInt("firstPlayed", now_ms)));
+      }
+    }
+  }
+  if (!root->has("firstPlayed")) root->set("firstPlayed", Tag::Long(now_ms));
+  root->set("lastPlayed", Tag::Long(now_ms));
+  {
+    auto pos = Tag::List(nbt::TAG_Double);
+    pos->list = {Tag::Double(p.x), Tag::Double(p.y), Tag::Double(p.z)};
+    root->set("Pos", pos);
+  }
+  root->set("Level", Tag::String(p.level ? p.level->name() : ""));
+  {
+    auto inv = Tag::List(nbt::TAG_Compound);
+    auto putInv = [&](const std::vector<item::ItemStack>& cont, int slot_base) {
+      for (std::size_t i = 0; i < cont.size(); ++i) {
+        const auto& it = cont[i];
+        auto c = Tag::Compound();
+        c->set("id", Tag::Short(it.id));
+        c->set("Count", Tag::Byte(static_cast<std::int8_t>(it.count)));
+        c->set("Damage", Tag::Short(it.damage));
+        c->set("Slot", Tag::Byte(static_cast<std::int8_t>(slot_base + static_cast<int>(i))));
+        c->set("TrueSlot", Tag::Byte(static_cast<std::int8_t>(it.empty() ? -1 : slot_base + static_cast<int>(i))));
+        if (!it.nbt.empty()) {
+          if (auto t = nbt::read(it.nbt, nbt::Endian::Little)) c->set("tag", t);
+        }
+        inv->list.push_back(c);
+      }
+    };
+    // PHP: armor at slots 0-3, then main inventory at 9+ (slot index = slot+9)
+    putInv(p.armor, 0);
+    std::vector<item::ItemStack> main27(p.inventory.begin(), p.inventory.begin() + std::min<std::size_t>(27, p.inventory.size()));
+    putInv(main27, 9);
+    // hotbar links: PHP stores hotbar slots pointing at inventory indexes
+    std::vector<item::ItemStack> hotbar(9, item::ItemStack::air());
+    for (int i = 0; i < 9; ++i) {
+      int link = p.hotbar_link[static_cast<std::size_t>(i)];
+      if (link >= 0 && link < static_cast<int>(p.inventory.size())) hotbar[static_cast<std::size_t>(i)] = p.inventory[static_cast<std::size_t>(link)];
+    }
+    putInv(hotbar, 27);
+    root->set("Inventory", inv);
+  }
+  root->set("Achievements", Tag::Compound());
+  root->set("playerGameType", Tag::Int(p.gamemode));
+  {
+    auto motion = Tag::List(nbt::TAG_Double);
+    motion->list = {Tag::Double(0), Tag::Double(0), Tag::Double(0)};
+    root->set("Motion", motion);
+    auto rot = Tag::List(nbt::TAG_Float);
+    rot->list = {Tag::Float(p.yaw), Tag::Float(p.pitch)};
+    root->set("Rotation", rot);
+  }
+  root->set("FallDistance", Tag::Float(p.fall_distance_));
+  root->set("Fire", Tag::Short(static_cast<std::int16_t>(p.fire_ticks_)));
+  root->set("Air", Tag::Short(300));
+  root->set("OnGround", Tag::Byte(p.on_ground_ ? 1 : 0));
+  root->set("Invulnerable", Tag::Byte(0));
+  root->set("NameTag", Tag::String(p.username));
+  root->set("Hunger", Tag::Short(static_cast<std::int16_t>(p.food)));
+  root->set("Health", Tag::Short(static_cast<std::int16_t>(p.health)));
+  root->set("MaxHealth", Tag::Short(20));
+  root->set("Experience", Tag::Long(p.xp_total));
+  root->set("ExpLevel", Tag::Long(p.xp_level));
+  root->set("XpLevel", Tag::Int(p.xp_level));
+  auto buf = nbt::writeGzip(*root, "", nbt::Endian::Big);
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) return false;
-  out.write("PLR1", 4);
-  // username
-  std::uint16_t nlen = static_cast<std::uint16_t>(std::min<std::size_t>(p.username.size(), 65535));
-  out.write(reinterpret_cast<const char*>(&nlen), 2);
-  out.write(p.username.data(), nlen);
-  // world name
-  std::string wname = p.level ? p.level->name() : "";
-  std::uint16_t wlen = static_cast<std::uint16_t>(std::min<std::size_t>(wname.size(), 65535));
-  out.write(reinterpret_cast<const char*>(&wlen), 2);
-  out.write(wname.data(), wlen);
-  out.write(reinterpret_cast<const char*>(&p.x), 4);
-  out.write(reinterpret_cast<const char*>(&p.y), 4);
-  out.write(reinterpret_cast<const char*>(&p.z), 4);
-  out.write(reinterpret_cast<const char*>(&p.yaw), 4);
-  out.write(reinterpret_cast<const char*>(&p.pitch), 4);
-  std::int32_t gm = p.gamemode;
-  std::int32_t hp = p.health;
-  out.write(reinterpret_cast<const char*>(&gm), 4);
-  out.write(reinterpret_cast<const char*>(&hp), 4);
-  out.write(reinterpret_cast<const char*>(&p.selected_hotbar), 4);
-  // hotbar links
-  for (int i = 0; i < 9; ++i) {
-    std::int32_t h = p.hotbar_link[static_cast<std::size_t>(i)];
-    out.write(reinterpret_cast<const char*>(&h), 4);
-  }
-  // inventory 36
-  std::uint16_t invn = static_cast<std::uint16_t>(p.inventory.size());
-  out.write(reinterpret_cast<const char*>(&invn), 2);
-  for (const auto& s : p.inventory) {
-    std::int16_t id = s.id;
-    std::uint8_t cnt = s.count;
-    std::int16_t dmg = s.damage;
-    out.write(reinterpret_cast<const char*>(&id), 2);
-    out.write(reinterpret_cast<const char*>(&cnt), 1);
-    out.write(reinterpret_cast<const char*>(&dmg), 2);
-  }
-  // armor 4
-  std::uint16_t arn = static_cast<std::uint16_t>(p.armor.size());
-  out.write(reinterpret_cast<const char*>(&arn), 2);
-  for (const auto& s : p.armor) {
-    std::int16_t id = s.id;
-    std::uint8_t cnt = s.count;
-    std::int16_t dmg = s.damage;
-    out.write(reinterpret_cast<const char*>(&id), 2);
-    out.write(reinterpret_cast<const char*>(&cnt), 1);
-    out.write(reinterpret_cast<const char*>(&dmg), 2);
-  }
+  out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
   return static_cast<bool>(out);
 }
 
@@ -201,58 +233,63 @@ bool PlayerManager::loadPlayer(Player& p) const {
   const auto path = players_data_path_ + "/" + playerFileName(p.username);
   std::ifstream in(path, std::ios::binary);
   if (!in) return false;
-  char magic[4]{};
-  in.read(magic, 4);
-  if (std::memcmp(magic, "PLR1", 4) != 0) return false;
-  std::uint16_t nlen = 0;
-  in.read(reinterpret_cast<char*>(&nlen), 2);
-  std::string uname(nlen, '\0');
-  in.read(uname.data(), nlen);
-  std::uint16_t wlen = 0;
-  in.read(reinterpret_cast<char*>(&wlen), 2);
-  std::string wname(wlen, '\0');
-  in.read(wname.data(), wlen);
-  in.read(reinterpret_cast<char*>(&p.x), 4);
-  in.read(reinterpret_cast<char*>(&p.y), 4);
-  in.read(reinterpret_cast<char*>(&p.z), 4);
-  in.read(reinterpret_cast<char*>(&p.yaw), 4);
-  in.read(reinterpret_cast<char*>(&p.pitch), 4);
-  std::int32_t gm = 0, hp = 20;
-  in.read(reinterpret_cast<char*>(&gm), 4);
-  in.read(reinterpret_cast<char*>(&hp), 4);
-  p.gamemode = gm;
-  p.health = hp;
-  in.read(reinterpret_cast<char*>(&p.selected_hotbar), 4);
-  for (int i = 0; i < 9; ++i) {
-    std::int32_t h = 0;
-    in.read(reinterpret_cast<char*>(&h), 4);
-    p.hotbar_link[static_cast<std::size_t>(i)] = h;
+  std::stringstream ss;
+  ss << in.rdbuf();
+  auto root = nbt::readCompressed(ss.str(), nbt::Endian::Big);
+  if (!root || root->type != nbt::TAG_Compound) return false;
+  if (auto pos = root->get("Pos"); pos && pos->list.size() == 3) {
+    p.x = static_cast<float>(pos->list[0]->d);
+    p.y = static_cast<float>(pos->list[1]->d);
+    p.z = static_cast<float>(pos->list[2]->d);
   }
-  std::uint16_t invn = 0;
-  in.read(reinterpret_cast<char*>(&invn), 2);
+  if (auto rot = root->get("Rotation"); rot && rot->list.size() == 2) {
+    p.yaw = static_cast<float>(rot->list[0]->d);
+    p.pitch = static_cast<float>(rot->list[1]->d);
+  }
+  p.gamemode = static_cast<int>(root->getInt("playerGameType", p.gamemode));
+  p.health = std::clamp(static_cast<int>(root->getInt("Health", 20)), 0, 20);
+  p.food = static_cast<float>(root->getInt("Hunger", 20));
+  p.xp_total = root->getInt("Experience", 0);
+  p.xp_level = static_cast<int>(root->getInt("ExpLevel", root->getInt("XpLevel", 0)));
+  p.fall_distance_ = static_cast<float>(root->getDouble("FallDistance", 0));
+  p.fire_ticks_ = static_cast<int>(root->getInt("Fire", 0));
+  p.saved_world_name = root->getString("Level");
+  // Inventory: armor slots 0-3, main 9-35, hotbar 27-35 mapping back to hotbar links
   p.inventory.assign(36, item::ItemStack::air());
-  for (std::uint16_t i = 0; i < invn && i < 36; ++i) {
-    std::int16_t id = 0;
-    std::uint8_t cnt = 0;
-    std::int16_t dmg = 0;
-    in.read(reinterpret_cast<char*>(&id), 2);
-    in.read(reinterpret_cast<char*>(&cnt), 1);
-    in.read(reinterpret_cast<char*>(&dmg), 2);
-    p.inventory[i] = item::ItemStack::of(id, cnt, dmg);
-  }
-  std::uint16_t arn = 0;
-  in.read(reinterpret_cast<char*>(&arn), 2);
   p.armor.assign(4, item::ItemStack::air());
-  for (std::uint16_t i = 0; i < arn && i < 4; ++i) {
-    std::int16_t id = 0;
-    std::uint8_t cnt = 0;
-    std::int16_t dmg = 0;
-    in.read(reinterpret_cast<char*>(&id), 2);
-    in.read(reinterpret_cast<char*>(&cnt), 1);
-    in.read(reinterpret_cast<char*>(&dmg), 2);
-    p.armor[i] = item::ItemStack::of(id, cnt, dmg);
+  if (auto inv = root->get("Inventory"); inv && inv->type == nbt::TAG_List) {
+    for (auto& c : inv->list) {
+      if (!c || c->type != nbt::TAG_Compound) continue;
+      int slot = static_cast<int>(c->getInt("Slot", -1));
+      item::ItemStack it;
+      it.id = static_cast<std::int16_t>(c->getInt("id"));
+      it.count = static_cast<std::uint8_t>(std::clamp<std::int64_t>(c->getInt("Count"), 0, 255));
+      it.damage = static_cast<std::int16_t>(c->getInt("Damage"));
+      if (auto tag = c->get("tag"); tag && tag->type == nbt::TAG_Compound && !tag->comp.empty())
+        it.nbt = nbt::write(*tag, "", nbt::Endian::Little);
+      it = item::sanitizeSlot(it);
+      if (slot >= 0 && slot <= 3) {
+        p.armor[static_cast<std::size_t>(slot)] = it;
+      } else if (slot >= 9 && slot < 36) {
+        p.inventory[static_cast<std::size_t>(slot - 9)] = it;
+      } else if (slot >= 27) {
+        // hotbar entry: find its true inventory index and link
+        int ts = static_cast<int>(c->getInt("TrueSlot", -1));
+        int hb = slot - 27;
+        if (ts >= 9 && ts < 36) p.hotbar_link[static_cast<std::size_t>(hb)] = ts - 9;
+        else if (!it.empty()) {
+          // hotbar item not in main grid: keep as direct hotbar entry
+          p.hotbar_link[static_cast<std::size_t>(hb)] = -1; // marker: direct
+          // stash into a spare main slot? PHP keeps hotbar items at 27-35 too; we map hotbar to inventory[link]
+        }
+      }
+    }
   }
-  p.saved_world_name = wname;
+  // Ensure hotbar links valid
+  for (int i = 0; i < 9; ++i) {
+    int& link = p.hotbar_link[static_cast<std::size_t>(i)];
+    if (link >= static_cast<int>(p.inventory.size())) link = i;
+  }
   p.has_saved_data = true;
   return true;
 }
