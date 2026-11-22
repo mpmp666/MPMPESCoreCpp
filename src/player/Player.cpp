@@ -2,6 +2,7 @@
 
 #include "mpmpes/binary/BinaryStream.hpp"
 #include "mpmpes/protocol/Info.hpp"
+#include "mpmpes/protocol/MultiProtocol.hpp"
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/util/Logger.hpp"
 
@@ -107,18 +108,34 @@ std::string PlayerManager::maybeBatch(std::string payload) const {
 void PlayerManager::sendPacket(Player& p, std::string payload, bool immediate) {
   auto* session = sessions_.getSession(p.endpoint);
   if (!session || session->closed()) return;
-  payload = maybeBatch(std::move(payload));
-  // 0.14 wire: chr(0x8e) . packet->buffer (RakLibInterface.php)
-  std::string wire;
-  wire.reserve(payload.size() + 1);
-  wire.push_back(static_cast<char>(protocol::MCPE_RAKNET_CUSTOM_PACKET_ID));
-  wire += payload;
-  raklib::EncapsulatedPacket enc;
-  // RELIABLE_ORDERED + channel 0 (same as PM for game packets)
-  enc.reliability = 3;
-  enc.order_channel = 0;
-  enc.buffer = std::move(wire);
-  session->addEncapsulated(std::move(enc), immediate);
+  if (payload.empty()) return;
+  const int family = protocol::mp::wireFamily(p.protocol);
+  auto emit = [&](std::string body) {
+    std::string wire(protocol::mp::encapPrefix(family));
+    wire += body;
+    raklib::EncapsulatedPacket enc;
+    // RELIABLE_ORDERED + channel 0 (same as PM for game packets)
+    enc.reliability = 3;
+    enc.order_channel = 0;
+    enc.buffer = std::move(wire);
+    session->addEncapsulated(std::move(enc), immediate);
+  };
+  if (family == protocol::mp::F014) {
+    if (static_cast<std::uint8_t>(payload[0]) >= 0xec) return; // 0.16-only virtual packet
+    emit(maybeBatch(std::move(payload)));
+    return;
+  }
+  // Cross-version (PHP RakLibInterface::putPacket + MultiProtocol::translateForFamily)
+  auto bufs = protocol::mp::translateOutgoing(family, payload);
+  if (bufs.empty()) return;
+  const bool want_batch = batch_threshold_kb_ >= 0 &&
+                          static_cast<std::uint8_t>(payload[0]) != protocol::BATCH_PACKET &&
+                          payload.size() >= static_cast<std::size_t>(batch_threshold_kb_) * 1024u;
+  if (want_batch || bufs.size() > 1) {
+    emit(protocol::mp::buildBatch(family, bufs, compression_level_));
+    return;
+  }
+  emit(std::move(bufs[0]));
 }
 
 bool PlayerManager::savePlayer(const Player& p) const {
@@ -336,9 +353,14 @@ void PlayerManager::sendCreativeContents(Player& p) {
   // clicked from creative palette (block forms that should be item forms only).
   std::vector<item::ItemStack> items;
   items.reserve(raw.size());
+  const int pr = p.protocol;
   for (auto s : raw) {
     s = item::sanitizeSlot(s);
     if (s.empty()) continue;
+    // PHP Player::getCreativeItemsForClient: per-version whitelists (unknown ids crash old clients)
+    if (protocol::mp::is013(pr) && !protocol::mp::isOldProtocolCreativeItem(s.id)) continue;
+    if (protocol::mp::is012(pr) && !protocol::mp::is012ProtocolCreativeItem(s.id)) continue;
+    if (protocol::mp::is011(pr) && !protocol::mp::is011CreativeItem(s.id, s.damage)) continue;
     // Never expose block-form hopper/comparator in creative window
     if (s.id == 154 || s.id == 149) continue;
     items.push_back(s);
@@ -460,7 +482,11 @@ void PlayerManager::doLoginSequence(Player& p) {
       p.uuid[static_cast<std::size_t>(8 + i)] = static_cast<std::uint8_t>((b >> (i * 8)) & 0xff);
   }
 
-  sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_LOGIN_SUCCESS), true);
+  // JWT clients (0.15/0.16) already got LOGIN_SUCCESS right after LOGIN (PHP Player LOGIN)
+  if (!protocol::mp::isJwt(p.protocol))
+    sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_LOGIN_SUCCESS), true);
+  // 0.16 waits for the resource-pack handshake before StartGame
+  if (protocol::mp::is016(p.protocol)) sendPacket(p, protocol::mp::encodeResourcePacksInfo(), true);
 
   // Client self-view eid is 0 in StartGame (PM convention)
   // PE 0.14: only dim 0/1 on wire — End (ender) reports OVERWORLD via protocolDimension()

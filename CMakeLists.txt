@@ -26,6 +26,7 @@ add_executable(mpmpes
   src/level/LevelStorage.cpp
   src/level/Region.cpp
   src/nbt/Tag.cpp
+  src/protocol/MultiProtocol.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp
@@ -81,3 +82,16 @@ if(MPMPES_BUILD_EXAMPLE_NATIVE)
 endif()
 
 install(TARGETS mpmpes RUNTIME DESTINATION bin)
+
+if(MPMPES_BUILD_TESTS)
+  enable_testing()
+  add_executable(mp_translation_diff tests/mp_translation_diff.cpp src/protocol/MultiProtocol.cpp src/nbt/Tag.cpp)
+  target_include_directories(mp_translation_diff PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(mp_translation_diff PRIVATE ZLIB::ZLIB)
+  add_test(NAME mp_translation_diff
+    COMMAND mp_translation_diff ${CMAKE_CURRENT_SOURCE_DIR}/tests/ref_php.txt)
+  add_executable(mp_incoming_test tests/mp_incoming_test.cpp src/protocol/MultiProtocol.cpp src/nbt/Tag.cpp src/binary/BinaryStream.cpp)
+  target_include_directories(mp_incoming_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(mp_incoming_test PRIVATE ZLIB::ZLIB)
+  add_test(NAME mp_incoming_test COMMAND mp_incoming_test)
+endif()

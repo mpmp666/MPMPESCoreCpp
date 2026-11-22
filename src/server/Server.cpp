@@ -6,6 +6,7 @@
 #include "mpmpes/plugin/PluginHostAccess.hpp"
 #include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/Packets.hpp"
+#include "mpmpes/protocol/MultiProtocol.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -1983,16 +1984,21 @@ void Server::handleLogin(player::Player& p, std::string_view buffer) {
     return;
   }
 
-  if (login.protocol1 != 70 && login.protocol1 != 60 && login.protocol1 != 46 &&
-      login.protocol1 != 45) {
-    players_->sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_LOGIN_FAILED_CLIENT),
+  if (p.spawned) return; // PHP: if($this->loggedIn) break;
+  // 0.11-0.16 accepted (PHP Player LOGIN + MultiProtocol families)
+  if (!protocol::mp::isAccepted(login.protocol1)) {
+    const bool old = login.protocol1 < protocol::CURRENT_PROTOCOL;
+    players_->sendPacket(p, protocol::encodePlayStatus(old ? protocol::PLAY_STATUS_LOGIN_FAILED_CLIENT
+                                                           : protocol::PLAY_STATUS_LOGIN_FAILED_SERVER),
                          true);
-    kickPlayer(p, "Outdated client");
+    kickPlayer(p, old ? "Outdated client" : "Outdated server");
     return;
   }
 
   p.username = login.username;
   p.protocol = login.protocol1;
+  if (protocol::mp::isJwt(p.protocol))
+    players_->sendPacket(p, protocol::encodePlayStatus(protocol::PLAY_STATUS_LOGIN_SUCCESS), true);
   p.client_id = login.client_id;
   p.uuid = login.uuid;
   p.skin_name = login.skin_name.empty() ? "Standard_Custom" : login.skin_name;
@@ -4129,11 +4135,31 @@ void Server::handleMcpePayload(const raklib::Endpoint& ep, const raklib::Encapsu
     p = &players_->getOrCreate(ep, 0);
   }
 
-  // 0.14 wire: [0x8e][pid][...] — strip custom packet id (RakLibInterface getPacket)
   std::string_view buf = pk.buffer;
+  // Cross-version clients (PHP RakLibInterface::handleEncapsulated/getPacket):
+  // protocol unknown yet -> sniff the login framing, else use the player's family.
+  int family = protocol::mp::wireFamily(p->protocol);
+  if (p->protocol == 0) {
+    const auto b0 = static_cast<std::uint8_t>(buf[0]);
+    if (b0 == 0x82 || b0 == 0xb1) family = protocol::mp::F011;
+    else if (b0 == 0xfe || b0 == 0x01) family = protocol::mp::F015; // 0.15/0.16 login [0xfe][0x01]
+    else if (b0 == protocol::BATCH_PACKET) family = protocol::mp::F013;   // 0.12/0.13 bare batch
+  }
+  if (family != protocol::mp::F014) {
+    for (auto& native : protocol::mp::translateIncoming(family, buf)) {
+      if (native.empty()) continue;
+      dispatchMcpePacket(*p, native);
+    }
+    return;
+  }
+  // 0.14 wire: [0x8e][pid][...] — strip custom packet id (RakLibInterface getPacket)
   if (static_cast<std::uint8_t>(buf[0]) == protocol::MCPE_RAKNET_CUSTOM_PACKET_ID) {
     if (buf.size() < 2) return;
     buf = buf.substr(1);
+  } else if (p->protocol == 0 && static_cast<std::uint8_t>(buf[0]) == protocol::LOGIN_PACKET) {
+    // 0.12/0.13 send bare [0x8f] logins: normalise to the full native layout
+    for (auto& native : protocol::mp::translateIncoming(protocol::mp::F013, buf)) dispatchMcpePacket(*p, native);
+    return;
   }
 
   const auto pid = static_cast<std::uint8_t>(buf[0]);
@@ -4215,6 +4241,18 @@ void Server::start() {
   players_->setDefaultLevel(levels_.defaultLevel());
   players_->setNetworkBatch(cfg_.network_compression_level, cfg_.network_batch_threshold_kb);
   players_->setPlayersDataPath("players");
+  protocol::mp::setStartGame16Info(1, cfg_.motd);
+  protocol::mp::setSkinLookup([this](std::int64_t eid, std::string& skin, bool& slim) {
+    for (auto& [_, o] : players_->all()) {
+      if (o.entity_id == eid) {
+        skin = o.skin_data;
+        std::string n = o.skin_name;
+        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+        slim = n.find("slim") != std::string::npos;
+        return;
+      }
+    }
+  });
   autosave_ticks_left_ = cfg_.autosave_seconds > 0 ? cfg_.autosave_seconds * 20 : 0;
 
   ops_.setPath("ops.txt");
