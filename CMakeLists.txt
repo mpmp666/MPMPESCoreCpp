@@ -31,6 +31,8 @@ add_executable(mpmpes
   src/entity/EntityNbt.cpp
   src/level/gen/NormalGenerator.cpp
   src/level/gen/NormalChunk.cpp
+  src/level/gen/NetherAstralChunk.cpp
+  src/level/gen/EndGenerator.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp

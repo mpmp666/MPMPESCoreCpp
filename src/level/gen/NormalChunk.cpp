@@ -125,9 +125,10 @@ void placeOreVein(Chunk& chunk, PmRandom& random, const OreType& type, int x, in
           sz *= sz;
           if (sx + sy + sz >= 1) continue;
           int lx = xx - (chunk.x() << 4), lz = zz - (chunk.z() << 4);
-          if (lx < 0 || lx > 15 || lz < 0 || lz > 15 || yy > 127) continue;
-          auto cur = chunk.getBlockId(lx, yy, lz);
-          if (cur == 1 || cur == 87) chunk.setBlock(lx, yy, lz, type.id, type.meta);
+          if (lx < 0 || lx > 15 || lz < 0 || lz > 15) continue;
+          int my = yy & 0x7f; // PHP y-wrap parity
+          auto cur = chunk.getBlockId(lx, my, lz);
+          if (cur == 1 || cur == 87) chunk.setBlock(lx, my, lz, type.id, type.meta);
         }
       }
     }

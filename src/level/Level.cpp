@@ -2,6 +2,8 @@
 
 #include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/Packets.hpp"
+#include "mpmpes/level/gen/NormalGenerator.hpp"
+#include "mpmpes/level/gen/EndGenerator.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -59,10 +61,18 @@ Chunk Level::generate(int cx, int cz) const {
       return generateNormalStubChunk(cx, cz, settings_.seed);
     case GeneratorType::Nether:
       return generateNetherChunk(cx, cz, settings_.seed);
-    case GeneratorType::End:
-      return generateEndChunk(cx, cz, settings_.seed);
-    case GeneratorType::Astral:
-      return generateEndChunk(cx, cz, settings_.seed);
+    case GeneratorType::End: {
+      Chunk c(cx, cz);
+      gen::generateEndTerrainChunk(c, settings_.seed);
+      c.setGenerated(true);
+      return c;
+    }
+    case GeneratorType::Astral: {
+      Chunk c(cx, cz);
+      gen::generateAstralChunk(c, settings_.seed);
+      c.setGenerated(true);
+      return c;
+    }
   }
   return generateFlatChunk(cx, cz);
 }

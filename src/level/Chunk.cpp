@@ -391,86 +391,9 @@ Chunk generateNormalStubChunk(int chunk_x, int chunk_z, std::int32_t seed) {
 
 Chunk generateNetherChunk(int chunk_x, int chunk_z, std::int32_t seed) {
   Chunk c(chunk_x, chunk_z);
-  constexpr std::uint32_t hell = 0xbf3b3b; // reddish
-  constexpr int ceil_y = 127;
-  constexpr int lava_y = 31;
-  // Fixed spawn island around world (0,0): solid plateau above lava so players can land.
-  constexpr int island_r = 20;       // radius in blocks
-  constexpr int island_top = 72;     // surface Y (feet at 73)
-
-  for (int z = 0; z < 16; ++z) {
-    for (int x = 0; x < 16; ++x) {
-      const int wx = (chunk_x << 4) + x;
-      const int wz = (chunk_z << 4) + z;
-      c.setBiome(x, z, 8, hell); // hell biome id (approx)
-
-      // floor / ceiling bedrock
-      c.setBlock(x, 0, z, protocol::BLOCK_BEDROCK);
-      c.setBlock(x, ceil_y, z, protocol::BLOCK_BEDROCK);
-
-      const int dist2 = wx * wx + wz * wz;
-      const bool on_spawn_island = dist2 <= island_r * island_r;
-
-      // netherrack terrain density (caves via noise threshold)
-      const float floor_n =
-          fbm2d(static_cast<float>(wx) * 0.04f, static_cast<float>(wz) * 0.04f, seed, 4);
-      const float ceil_n =
-          fbm2d(static_cast<float>(wx) * 0.03f + 50.f, static_cast<float>(wz) * 0.03f + 50.f,
-                seed + 11, 3);
-      // Raise floors so some land pokes above lava seas (was often fully submerged).
-      int floor_h = 18 + static_cast<int>(floor_n * 40.f); // ~18-58
-      int ceil_h = ceil_y - 4 - static_cast<int>(ceil_n * 20.f); // ~103-123
-      floor_h = std::clamp(floor_h, 4, 64);
-      // Keep ceiling high enough that floors never seal into solid columns.
-      ceil_h = std::clamp(ceil_h, 100, ceil_y - 2);
-
-      if (on_spawn_island) {
-        // Soft edge: full height to island_r-4, then slope down toward lava.
-        const int dist = static_cast<int>(std::sqrt(static_cast<float>(dist2)));
-        int top = island_top;
-        if (dist > island_r - 4) {
-          top = island_top - (dist - (island_r - 4)) * 3;
-          if (top < lava_y + 2) top = lava_y + 2;
-        }
-        floor_h = top;
-        // Guarantee tall open air above the forced spawn island (no ceiling trap).
-        if (ceil_h < floor_h + 24) ceil_h = floor_h + 24;
-        if (ceil_h > ceil_y - 2) ceil_h = ceil_y - 2;
-      } else if (ceil_h <= floor_h + 8) {
-        // Non-island: keep at least 8 air between floor top and ceiling bottom.
-        ceil_h = std::min(ceil_y - 2, floor_h + 16);
-      }
-
-      for (int y = 1; y < ceil_y; ++y) {
-        if (y <= floor_h || y >= ceil_h) {
-          // occasional gravel / glowstone pockets near surfaces
-          const auto nh = hash2(wx + y * 3, wz - y * 7, seed + 5);
-          if (y > 4 && y < floor_h && (nh % 40) == 0)
-            c.setBlock(x, y, z, protocol::BLOCK_GRAVEL);
-          else if ((y == floor_h || y == ceil_h) && (nh % 90) == 0)
-            c.setBlock(x, y, z, protocol::BLOCK_GLOWSTONE);
-          else
-            c.setBlock(x, y, z, protocol::BLOCK_NETHERRACK);
-        } else if (y <= lava_y && !on_spawn_island) {
-          // No lava under the forced spawn island.
-          c.setBlock(x, y, z, protocol::BLOCK_LAVA);
-        }
-        // else air (open cavern)
-      }
-
-      // hanging glowstone blobs under ceiling
-      const auto gh = hash2(wx, wz, seed + 88);
-      if ((gh % 70) == 0 && ceil_h > lava_y + 10) {
-        const int gy = ceil_h - 1 - static_cast<int>(gh % 4);
-        for (int dy = 0; dy < 3; ++dy) {
-          if (gy - dy > lava_y) c.setBlock(x, gy - dy, z, protocol::BLOCK_GLOWSTONE);
-        }
-      }
-
-      c.setHeight(x, z, static_cast<std::uint8_t>(floor_h + 1));
-    }
-  }
+  gen::generateNetherChunk(c, seed);
   c.setGenerated(true);
+  c.recomputeHeightMap();
   return c;
 }
 

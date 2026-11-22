@@ -23,6 +23,7 @@ public:
   int nextRange(int start, int end) { return start + (nextInt() % (end + 1 - start)); }
   int nextBoundedInt(int bound) { return nextInt() % bound; }
 
+  std::int64_t debugSeed() const { return seed_; }
 private:
   std::int64_t seed_ = 0;
 };
@@ -66,6 +67,10 @@ inline std::int64_t chunkSeed(std::int64_t seed, int cx, int cz) {
 }
 
 void generateNormalChunk(Chunk& chunk, std::int64_t seed);
+void generateNetherChunk(Chunk& chunk, std::int64_t seed);
+void generateAstralChunk(Chunk& chunk, std::int64_t seed);
+// in EndGenerator.cpp
+
 
 // BiomeSelector: temperature/rainfall simplex pair + 64x64 lookup map
 class BiomeSelector {
