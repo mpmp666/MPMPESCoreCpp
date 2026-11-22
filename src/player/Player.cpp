@@ -499,7 +499,14 @@ void PlayerManager::doLoginSequence(Player& p) {
   sendPacket(p, protocol::encodeSetTime(p.level->time(), true), true);
   sendPacket(p, protocol::encodeSetSpawnPosition(spawn.x, spawn.y, spawn.z), true);
   sendPacket(p, protocol::encodeSetHealth(p.health), true);
-  sendPacket(p, protocol::encodeSetDifficulty(1), true);
+  sendPacket(p, protocol::encodeSetDifficulty(difficulty_), true);
+  // Weather state sync (Genisys Weather::sendWeather on join)
+  if (p.level) {
+    if (p.level->raining())
+      sendPacket(p, protocol::encodeLevelEvent(protocol::EVENT_START_RAIN, 0, 0, 0, 10000), true);
+    if (p.level->thundering())
+      sendPacket(p, protocol::encodeLevelEvent(protocol::EVENT_START_THUNDER, 0, 0, 0, 10000), true);
+  }
   sendPacket(p, protocol::encodeSetPlayerGameType(p.gamemode), true);
 
   std::int32_t flags = 0x40; // auto_jump

@@ -1,5 +1,6 @@
 #include "mpmpes/config/ServerProperties.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <sstream>
@@ -88,6 +89,21 @@ void ServerProperties::applyTo(const std::unordered_map<std::string, std::string
   if (auto* v = get("enable-plugins")) {
     cfg.enable_plugins = (*v == "on" || *v == "true" || *v == "1");
   }
+  if (auto* v = get("difficulty")) {
+    try {
+      int d = std::stoi(*v);
+      cfg.difficulty = std::clamp(d, 0, 3);
+    } catch (...) {}
+  }
+  if (auto* v = get("white-list")) cfg.white_list = (*v == "on" || *v == "true" || *v == "1");
+  if (auto* v = get("spawn-protection")) {
+    try { cfg.spawn_protection = std::stoi(*v); } catch (...) {}
+  }
+  if (auto* v = get("max-players")) {
+    try { if (int m = std::stoi(*v); m > 0) cfg.max_players = m; } catch (...) {}
+  }
+  if (auto* v = get("announce-player-achievements"))
+    cfg.announce_player_achievements = (*v != "off" && *v != "false" && *v != "0");
   if (auto* v = get("network-compression-level")) {
     try {
       cfg.network_compression_level = std::stoi(*v);

@@ -178,6 +178,11 @@ private:
 
   OpsList ops_;
   BanList bans_;
+  OpsList whitelist_;
+  int difficulty_ = 1;
+  bool save_enabled_ = true;
+  std::chrono::steady_clock::time_point started_at_{};
+  int ticks_ = 0;
   std::thread console_thread_;
   std::mutex console_mu_;
   std::queue<std::string> console_queue_;

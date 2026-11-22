@@ -180,6 +180,8 @@ public:
 
   // Persist player pos/inv/gm under players/<name>.dat
   void setPlayersDataPath(std::string path) { players_data_path_ = std::move(path); }
+  void setDifficulty(int d) { difficulty_ = d; }
+  int difficulty() const { return difficulty_; }
   bool savePlayer(const Player& p) const;
   bool loadPlayer(Player& p) const;
   void saveAllPlayers() const;
@@ -202,6 +204,7 @@ private:
   level::Level* default_level_ = nullptr;
   std::unordered_map<std::string, Player> players_;
   std::int64_t next_entity_id_ = 1; // 0 reserved for self view in StartGame
+  int difficulty_ = 1;
   int compression_level_ = 7;
   int batch_threshold_kb_ = 1; // -1 = off
   std::string players_data_path_ = "players";

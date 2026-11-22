@@ -2014,6 +2014,13 @@ void Server::handleLogin(player::Player& p, std::string_view buffer) {
     return;
   }
 
+  // Whitelist (ops bypass, PHP Server::hasWhitelist + Player login)
+  if (cfg_.white_list && !ops_.isOp(p.username) && !whitelist_.isOp(p.username)) {
+    util::Logger::instance().notice("Rejected non-whitelisted login ", p.username);
+    kickPlayer(p, "You are not white-listed on this server");
+    return;
+  }
+
   // Load pos/inv/world BEFORE StartGame so spawn uses saved data
   players_->loadPlayer(p);
   if (p.has_saved_data && !p.saved_world_name.empty()) {
@@ -2772,6 +2779,388 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     }
     // Avoid stop() under game_mutex_ (console queue); just request shutdown.
     running_ = false;
+    return;
+  }
+
+
+  // ---- split args (quoted aware)
+  auto splitArgs = [](std::string_view v) {
+    std::vector<std::string> out;
+    std::string cur;
+    bool q = false;
+    for (char c : v) {
+      if (c == '"') { q = !q; continue; }
+      if ((c == ' ' || c == '\t') && !q) {
+        if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+      } else cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+  };
+  auto toInt = [](const std::string& v, bool& ok) -> int {
+    try { ok = true; return std::stoi(v); } catch (...) { ok = false; return 0; }
+  };
+  // Coordinate: absolute, or ~relative to player
+  auto coordOf = [&](const std::string& v, float base, bool& ok) -> float {
+    if (!v.empty() && v[0] == '~') {
+      if (v.size() == 1) return base;
+      bool ok2 = false;
+      auto d = std::stof(v.substr(1));
+      ok = true;
+      (void)ok2;
+      return base + d;
+    }
+    try { ok = true; return std::stof(v); } catch (...) { ok = false; return base; }
+  };
+  auto joinMsg = [&](const std::vector<std::string>& v, std::size_t from) {
+    std::string out;
+    for (std::size_t i = from; i < v.size(); ++i) { if (i > from) out += ' '; out += v[i]; }
+    return out;
+  };
+  const std::string RED = std::string("\xc2\xa7") + "c";
+
+  if (cmd == "seed") {
+    auto* lvl = (player && player->level) ? player->level : levels_.defaultLevel();
+    reply("Seed: " + std::to_string(lvl ? lvl->seed() : 0));
+    return;
+  }
+
+  if (cmd == "plugins") {
+    reply("Plugins (" + std::to_string(plugins_.size()) + ")");
+    return;
+  }
+
+  if (cmd == "say") {
+    auto msg = trim(std::string(args));
+    if (msg.empty()) { reply("Usage: /say <message>"); return; }
+    if (players_) players_->broadcastText(std::string("\xc2\xa7") + "d[Server] " + msg);
+    return;
+  }
+
+  if (cmd == "tell" || cmd == "w" || cmd == "msg") {
+    auto v = splitArgs(args);
+    if (v.size() < 2) { reply("Usage: /tell <player> <message>"); return; }
+    auto* target = findPlayerByName(v[0]);
+    if (!target) { reply(RED + "Player not found: " + v[0]); return; }
+    auto msg = joinMsg(v, 1);
+    std::string wire = "\xc2\xa7";
+    wire += "7[" + std::string(source_name) + " -> " + target->username + "] " + msg;
+    players_->sendPacket(*target, protocol::encodeTextRaw(wire), false);
+    if (player) {
+      players_->sendPacket(*player, protocol::encodeTextRaw(wire), false);
+    } else {
+      reply(wire);
+    }
+    return;
+  }
+
+  if (cmd == "kill") {
+    player::Player* target = player;
+    auto v = splitArgs(args);
+    if (!v.empty()) {
+      target = findPlayerByName(v[0]);
+      if (!target) { reply(RED + "Player not found: " + v[0]); return; }
+    }
+    if (!target) { reply("kill requires a target"); return; }
+    // PHP /kill bypasses creative invulnerability: force-lethal damage through the
+    // standard death flow (respawn unlock packet included).
+    {
+      target->hurt_cooldown_ = 0;
+      const int saved_gm = target->gamemode;
+      target->gamemode = 0;
+      damagePlayer(*target, static_cast<float>(target->health) + 1000.f, "suicide");
+      target->gamemode = saved_gm;
+    }
+    reply("Killed " + target->username);
+    return;
+  }
+
+  if (cmd == "tp" || cmd == "teleport") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /tp <player> | /tp <x> <y> <z> | /tp <a> <b> | /tp <p> <x> <y> <z>"); return; }
+    player::Player* target = player;
+    if (!target && v.size() < 2) { reply("Console: /tp <player> <x y z|player>"); return; }
+
+    // /tp <destPlayer> (self)
+    if (v.size() == 1 && player) {
+      auto* dest = findPlayerByName(v[0]);
+      if (!dest) { reply(RED + "Player not found: " + v[0]); return; }
+      changePlayerWorld(*player, dest->level, dest->x, dest->y, dest->z, true);
+      reply("Teleported to " + dest->username);
+      return;
+    }
+    // /tp <a> <b>
+    if (v.size() == 2) {
+      auto* a = findPlayerByName(v[0]);
+      auto* b = findPlayerByName(v[1]);
+      if (!a || !b) { reply(RED + "Player not found"); return; }
+      changePlayerWorld(*a, b->level, b->x, b->y, b->z, false);
+      reply("Teleported " + a->username + " to " + b->username);
+      return;
+    }
+    // coordinates
+    bool okx = false;
+    float probe = 0.f;
+    (void)coordOf(v[0], 0, okx); // probe whether first arg is a number
+    try { probe = std::stof(v[0]); okx = true; } catch (...) { okx = false; }
+    std::size_t base = 0;
+    if (!okx) {
+      target = findPlayerByName(v[0]);
+      if (!target) { reply(RED + "Player not found: " + v[0]); return; }
+      base = 1;
+    }
+    if (v.size() - base < 3) { reply("Usage: /tp [player] <x> <y> <z>"); return; }
+    if (!target) { reply(RED + "No target"); return; }
+    bool ok1 = false, ok2 = false, ok3 = false;
+    float x = coordOf(v[base], target->x, ok1);
+    float y = coordOf(v[base + 1], target->y, ok2);
+    float z = coordOf(v[base + 2], target->z, ok3);
+    if (!(ok1 && ok2 && ok3)) { reply(RED + "Invalid coordinates"); return; }
+    changePlayerWorld(*target, target->level, x, y, z, true);
+    reply("Teleported " + target->username + " to " + std::to_string(x) + ", " + std::to_string(y) + ", " + std::to_string(z));
+    return;
+  }
+
+  if (cmd == "time") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /time <set|add|query|start|stop> [value]"); return; }
+    auto setAll = [&](std::int32_t t) {
+      for (auto& [_, lvl] : levels_.all()) {
+        lvl->setTime(t);
+        players_->broadcastPacket(protocol::encodeSetTime(t, lvl->timeRunning()), lvl.get());
+      }
+    };
+    if (v[0] == "query") {
+      auto* lvl = (player && player->level) ? player->level : levels_.defaultLevel();
+      reply("Time: " + std::to_string(lvl ? lvl->time() : 0));
+      return;
+    }
+    if (v[0] == "start" || v[0] == "stop") {
+      bool run = v[0] == "start";
+      for (auto& [_, lvl] : levels_.all()) {
+        lvl->setTimeRunning(run);
+        players_->broadcastPacket(protocol::encodeSetTime(lvl->time(), run), lvl.get());
+      }
+      reply(run ? "Restarted the time" : "Stopped the time");
+      return;
+    }
+    if ((v[0] == "set" || v[0] == "add") && v.size() >= 2) {
+      std::int32_t value;
+      if (v[0] == "set" && v[1] == "day") value = 1000;
+      else if (v[0] == "set" && v[1] == "night") value = 13000;
+      else {
+        bool ok = false;
+        value = toInt(v[1], ok);
+        if (!ok) { reply(RED + "Invalid number: " + v[1]); return; }
+      }
+      if (v[0] == "set") setAll(value);
+      else {
+        for (auto& [_, lvl] : levels_.all()) {
+          auto t = static_cast<std::int32_t>((lvl->time() + value) % 24000);
+          lvl->setTime(t);
+          players_->broadcastPacket(protocol::encodeSetTime(t, lvl->timeRunning()), lvl.get());
+        }
+      }
+      reply(v[0] == "set" ? ("Set time to " + std::to_string(value)) : ("Added " + std::to_string(value) + " to time"));
+      return;
+    }
+    reply("Usage: /time <set|add|query|start|stop> [value]");
+    return;
+  }
+
+  if (cmd == "weather") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /weather <clear|rain|thunder> [duration-seconds]"); return; }
+    level::Level* lvl = (player && player->level) ? player->level : levels_.defaultLevel();
+    std::string wname = v[0];
+    // optional world name first (console): /weather <world> <type>
+    if (v.size() >= 2) {
+      if (auto* l2 = levels_.get(v[0])) { lvl = l2; wname = v[1]; }
+    }
+    int dur = 6000;
+    if (v.size() >= 2 && lvl == ((player && player->level) ? player->level : levels_.defaultLevel()) && v.size() >= 2) {
+      bool ok = false; int d = toInt(v.back(), ok); if (ok) dur = d;
+    }
+    if (!lvl) { reply(RED + "No world"); return; }
+    std::transform(wname.begin(), wname.end(), wname.begin(), ::tolower);
+    if (wname == "clear" || wname == "0") {
+      lvl->setRaining(false); lvl->setThundering(false);
+      players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_STOP_RAIN, 0, 0, 0, 0), lvl);
+      players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_STOP_THUNDER, 0, 0, 0, 0), lvl);
+    } else if (wname == "rain" || wname == "1") {
+      lvl->setRaining(true); lvl->setThundering(false);
+      players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_START_RAIN, 0, 0, 0, dur), lvl);
+    } else if (wname == "thunder" || wname == "storm" || wname == "2") {
+      lvl->setRaining(true); lvl->setThundering(true);
+      players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_START_RAIN, 0, 0, 0, dur), lvl);
+      players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_START_THUNDER, 0, 0, 0, dur), lvl);
+    } else {
+      reply(RED + "Unknown weather: " + wname);
+      return;
+    }
+    lvl->markEntitiesDirty();
+    reply("Weather changed in " + lvl->name());
+    return;
+  }
+
+  if (cmd == "setblock" || cmd == "fill") {
+    if (!player || !player->level) { reply("Requires an in-game player"); return; }
+    auto v = splitArgs(args);
+    if (cmd == "setblock") {
+      if (v.size() < 4) { reply("Usage: /setblock <x> <y> <z> <id> [meta]"); return; }
+      bool ok1, ok2, ok3;
+      int x = static_cast<int>(coordOf(v[0], player->x, ok1));
+      int y = static_cast<int>(coordOf(v[1], player->y, ok2));
+      int z = static_cast<int>(coordOf(v[2], player->z, ok3));
+      bool oki; int id = toInt(v[3], oki);
+      int meta = 0;
+      if (v.size() >= 5) { bool okm; meta = toInt(v[4], okm) ; if (!okm) meta = 0; }
+      if (!(ok1 && ok2 && ok3 && oki)) { reply(RED + "Invalid args"); return; }
+      if (id < 0 || id > 255) { reply(RED + "Invalid block id"); return; }
+      player->level->setBlock(x, y, z, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(meta));
+      broadcastBlockUpdate(player->level, x, y, z, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(meta));
+      reply("Set block at " + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z));
+      return;
+    }
+    // fill
+    if (v.size() < 7) { reply("Usage: /fill <x1> <y1> <z1> <x2> <y2> <z2> <id> [meta]"); return; }
+    bool ok = true;
+    int x1 = static_cast<int>(coordOf(v[0], player->x, ok));
+    int y1 = static_cast<int>(coordOf(v[1], player->y, ok));
+    int z1 = static_cast<int>(coordOf(v[2], player->z, ok));
+    int x2 = static_cast<int>(coordOf(v[3], player->x, ok));
+    int y2 = static_cast<int>(coordOf(v[4], player->y, ok));
+    int z2 = static_cast<int>(coordOf(v[5], player->z, ok));
+    bool oki; int id = toInt(v[6], oki);
+    int meta = 0;
+    if (v.size() >= 8) { bool okm; meta = toInt(v[7], okm); if (!okm) meta = 0; }
+    if (!ok || !oki || id < 0 || id > 255) { reply(RED + "Invalid args"); return; }
+    int ax = std::min(x1, x2), bx = std::max(x1, x2);
+    int ay = std::min(y1, y2), by = std::max(y1, y2);
+    int az = std::min(z1, z2), bz = std::max(z1, z2);
+    long long vol = 1LL * (bx - ax + 1) * (by - ay + 1) * (bz - az + 1);
+    if (vol > 65536) { reply(RED + "Region too large (max 65536 blocks)"); return; }
+    long long done = 0;
+    for (int x = ax; x <= bx; ++x)
+      for (int y = ay; y <= by; ++y)
+        for (int z = az; z <= bz; ++z) {
+          player->level->setBlock(x, y, z, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(meta));
+          broadcastBlockUpdate(player->level, x, y, z, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(meta));
+          ++done;
+        }
+    reply("Filled " + std::to_string(done) + " blocks");
+    return;
+  }
+
+  if (cmd == "difficulty") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /difficulty <0-3|peaceful|easy|normal|hard>"); return; }
+    std::string d = v[0];
+    std::transform(d.begin(), d.end(), d.begin(), ::tolower);
+    int val = -1;
+    if (d == "peaceful" || d == "0" || d == "p") val = 0;
+    else if (d == "easy" || d == "1" || d == "e") val = 1;
+    else if (d == "normal" || d == "2" || d == "n") val = 2;
+    else if (d == "hard" || d == "3" || d == "h") val = 3;
+    if (val < 0) { reply(RED + "Invalid difficulty: " + d); return; }
+    difficulty_ = val;
+    cfg_.difficulty = val;
+    if (players_) {
+      players_->setDifficulty(val);
+      players_->broadcastPacket(protocol::encodeSetDifficulty(val));
+    }
+    protocol::mp::setStartGame16Info(val, cfg_.motd);
+    reply("Set difficulty to " + std::to_string(val));
+    return;
+  }
+
+  if (cmd == "spawnpoint" || cmd == "setworldspawn") {
+    if (cmd == "spawnpoint" && !player) { reply("Requires an in-game player"); return; }
+    level::Level* lvl = (player && player->level) ? player->level : levels_.defaultLevel();
+    if (!lvl) { reply(RED + "No world"); return; }
+    auto v = splitArgs(args);
+    int x = 0, y = 0, z = 0;
+    if (v.size() >= 3) {
+      bool ok = true;
+      float base_x = player ? player->x : static_cast<float>(lvl->spawn().x);
+      float base_y = player ? player->y : static_cast<float>(lvl->spawn().y);
+      float base_z = player ? player->z : static_cast<float>(lvl->spawn().z);
+      x = static_cast<int>(coordOf(v[0], base_x, ok));
+      y = static_cast<int>(coordOf(v[1], base_y, ok));
+      z = static_cast<int>(coordOf(v[2], base_z, ok));
+      if (!ok) { reply(RED + "Invalid coordinates"); return; }
+    } else if (player) {
+      x = static_cast<int>(player->x); y = static_cast<int>(player->y); z = static_cast<int>(player->z);
+    } else {
+      reply("Usage: /setworldspawn <x> <y> <z>");
+      return;
+    }
+    lvl->setSpawn({x, y, z});
+    lvl->saveLevelData();
+    if (cmd == "spawnpoint" && player)
+      players_->sendPacket(*player, protocol::encodeSetSpawnPosition(x, y, z), true);
+    reply("Spawn set to " + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z) + " in " + lvl->name());
+    return;
+  }
+
+  if (cmd == "defaultgamemode") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /defaultgamemode <0|1|survival|creative>"); return; }
+    std::string m = v[0];
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    int gm = (m == "1" || m == "c" || m == "creative") ? 1 : (m == "0" || m == "s" || m == "survival") ? 0 : -1;
+    if (gm < 0) { reply(RED + "Invalid gamemode: " + m); return; }
+    cfg_.gamemode = gm;
+    reply("Default gamemode set to " + std::string(gm == 1 ? "creative" : "survival"));
+    return;
+  }
+
+  if (cmd == "whitelist") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /whitelist <on|off|add|remove|list> [player]"); return; }
+    if (v[0] == "on" || v[0] == "off") {
+      cfg_.white_list = v[0] == "on";
+      reply("Whitelist " + v[0]);
+      return;
+    }
+    if (v[0] == "list") {
+      reply("Whitelist (reused ops list is separate); white-list=" + std::string(cfg_.white_list ? "on" : "off"));
+      return;
+    }
+    if ((v[0] == "add" || v[0] == "remove") && v.size() >= 2) {
+      if (v[0] == "add") whitelist_.addOp(v[1]); else whitelist_.removeOp(v[1]);
+      whitelist_.save();
+      reply(v[0] == "add" ? ("Added " + v[1] + " to whitelist") : ("Removed " + v[1] + " from whitelist"));
+      return;
+    }
+    reply("Usage: /whitelist <on|off|add|remove|list> [player]");
+    return;
+  }
+
+  if (cmd == "save" || cmd == "save-all") {
+    reply("Saving...");
+    saveEverything(true);
+    reply("Saved.");
+    return;
+  }
+  if (cmd == "save-on") { save_enabled_ = true; reply("Auto-save enabled"); return; }
+  if (cmd == "save-off") { save_enabled_ = false; reply("Auto-save disabled"); return; }
+
+  if (cmd == "status") {
+    auto up = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started_at_).count();
+    std::ostringstream os;
+    os << "Uptime " << up << "s | players " << (players_ ? players_->count() : 0) << "/" << cfg_.max_players
+       << " | worlds " << levels_.all().size() << " | plugins " << plugins_.size()
+       << " | ticks " << ticks_;
+    reply(os.str());
+    return;
+  }
+
+  if (cmd == "reload") {
+    ops_.load();
+    bans_.load();
+    whitelist_.load();
+    reply("Reloaded ops/bans/whitelist");
     return;
   }
 
@@ -4241,7 +4630,6 @@ void Server::start() {
   players_->setDefaultLevel(levels_.defaultLevel());
   players_->setNetworkBatch(cfg_.network_compression_level, cfg_.network_batch_threshold_kb);
   players_->setPlayersDataPath("players");
-  protocol::mp::setStartGame16Info(1, cfg_.motd);
   protocol::mp::setSkinLookup([this](std::int64_t eid, std::string& skin, bool& slim) {
     for (auto& [_, o] : players_->all()) {
       if (o.entity_id == eid) {
@@ -4260,6 +4648,12 @@ void Server::start() {
   log.info("Operators loaded: ", ops_.size(), " from ops.txt");
   bans_.setPath("bans.txt");
   bans_.load();
+  whitelist_.setPath("white-list.txt");
+  whitelist_.load();
+  difficulty_ = std::clamp(cfg_.difficulty, 0, 3);
+  players_->setDifficulty(difficulty_);
+  protocol::mp::setStartGame16Info(difficulty_, cfg_.motd);
+  started_at_ = std::chrono::steady_clock::now();
   log.info("Bans loaded: names=", bans_.nameCount(), " ips=", bans_.ipCount(),
            " cids=", bans_.cidCount(), " from bans.txt");
 
@@ -4358,13 +4752,12 @@ void Server::networkThreadMain() {
 }
 
 void Server::stop() {
-  if (!running_.exchange(false)) return;
+  const bool was_running = running_.exchange(false);
+  // Even when the run loop already exited (was_running == false) we must still
+  // detach the console reader / join the network thread — a joinable thread's
+  // destructor would otherwise call std::terminate.
   plugin::setPluginHostAccess({});
-  util::Logger::instance().notice("Stopping...");
-  if (console_thread_.joinable()) {
-    // wake console reader by closing stdin is hard; thread exits on running_ false after next line
-    // or EOF — join may block if stdin blocked; detach if needed after short wait
-  }
+  if (was_running) util::Logger::instance().notice("Stopping...");
   if (network_thread_.joinable()) network_thread_.join();
   network_thread_started_ = false;
   if (console_thread_.joinable()) {
@@ -4372,6 +4765,7 @@ void Server::stop() {
     console_thread_.detach();
     console_thread_started_ = false;
   }
+  if (!was_running) return;
   ops_.save();
   bans_.save();
   {
@@ -4382,6 +4776,7 @@ void Server::stop() {
 }
 
 void Server::runLoop() {
+
   using namespace std::chrono_literals;
   auto next = std::chrono::steady_clock::now();
   while (running_) {
@@ -4398,6 +4793,7 @@ void Server::runLoop() {
       tickPlayerDamage();
       tickAutosave();
       ++tick_counter_;
+      ++ticks_;
       if ((tick_counter_ % 20) == 0 && players_) {
         for (auto& [_, pl] : players_->all()) {
           if (pl.spawned) players_->sendChunksAround(pl);

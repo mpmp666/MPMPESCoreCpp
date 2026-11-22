@@ -34,6 +34,13 @@ struct ServerConfig {
 
   // Autosave interval in seconds (0 = only on quit/stop)
   int autosave_seconds = 60;
+
+  // server.properties parity
+  int difficulty = 1;              // 0-3
+  bool white_list = false;         // white-list=on/off
+  int spawn_protection = 16;       // blocks; -1 disables
+  int view_distance = 8;           // chunk radius cap hint (client radius still wins)
+  bool announce_player_achievements = true;
 };
 
 } // namespace mpmpes::server

@@ -108,7 +108,8 @@ inline const char* permName(PermLevel p) {
 inline PermLevel commandRequiredLevel(std::string_view cmd) {
   // public
   if (cmd == "help" || cmd == "?" || cmd == "list" || cmd == "worlds" || cmd == "spawn" ||
-      cmd == "me" || cmd == "ver" || cmd == "version")
+      cmd == "me" || cmd == "ver" || cmd == "version" || cmd == "seed" || cmd == "plugins" ||
+      cmd == "tell" || cmd == "w" || cmd == "msg")
     return PermLevel::Player;
   // operator
   if (cmd == "gm" || cmd == "gamemode" || cmd == "give" || cmd == "spawnmob" || cmd == "summon" ||
@@ -116,7 +117,11 @@ inline PermLevel commandRequiredLevel(std::string_view cmd) {
       cmd == "stop" || cmd == "kick" || cmd == "ban" || cmd == "unban" || cmd == "pardon" ||
       cmd == "ban-ip" || cmd == "banip" || cmd == "unban-ip" || cmd == "pardon-ip" ||
       cmd == "ban-cid" || cmd == "bancid" || cmd == "unban-cid" || cmd == "pardon-cid" ||
-      cmd == "banlist")
+      cmd == "banlist" || cmd == "tp" || cmd == "teleport" || cmd == "time" || cmd == "weather" ||
+      cmd == "kill" || cmd == "say" || cmd == "setblock" || cmd == "fill" || cmd == "difficulty" ||
+      cmd == "spawnpoint" || cmd == "setworldspawn" || cmd == "defaultgamemode" ||
+      cmd == "whitelist" || cmd == "save" || cmd == "save-all" || cmd == "save-on" ||
+      cmd == "save-off" || cmd == "status" || cmd == "reload" || cmd == "effect" || cmd == "xp")
     return PermLevel::Op;
   // unknown: still Player so we can reply "unknown" rather than silent deny
   return PermLevel::Player;

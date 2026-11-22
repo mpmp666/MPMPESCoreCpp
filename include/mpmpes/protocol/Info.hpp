@@ -106,6 +106,10 @@ inline constexpr std::int16_t EVENT_PARTICLE_DESTROY = 2001;
 inline constexpr std::int16_t EVENT_PARTICLE_SPAWN = 2004;
 inline constexpr std::int16_t EVENT_SOUND_CLICK = 1000;
 inline constexpr std::int16_t EVENT_SOUND_DOOR = 1003; // chest open/close click-ish
+inline constexpr std::int16_t EVENT_START_RAIN = 3001;
+inline constexpr std::int16_t EVENT_START_THUNDER = 3002;
+inline constexpr std::int16_t EVENT_STOP_RAIN = 3003;
+inline constexpr std::int16_t EVENT_STOP_THUNDER = 3004;
 inline constexpr std::int16_t EVENT_ADD_PARTICLE_MASK = 0x4000;
 
 // Container windows
