@@ -1,6 +1,7 @@
 #include "mpmpes/level/Chunk.hpp"
 
 #include "mpmpes/binary/BinaryStream.hpp"
+#include "mpmpes/level/gen/NormalGenerator.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -382,101 +383,9 @@ float fbm2d(float x, float z, std::int32_t seed, int octaves = 4) {
 
 Chunk generateNormalStubChunk(int chunk_x, int chunk_z, std::int32_t seed) {
   Chunk c(chunk_x, chunk_z);
-  constexpr std::uint32_t plains = 0x8DB360;
-  constexpr std::uint32_t forest = 0x056621;
-  constexpr int sea = 62;
-
-  for (int z = 0; z < 16; ++z) {
-    for (int x = 0; x < 16; ++x) {
-      const int wx = (chunk_x << 4) + x;
-      const int wz = (chunk_z << 4) + z;
-
-      // multi-octave hills: base ~58-78, peaks a bit higher
-      const float n = fbm2d(static_cast<float>(wx) * 0.02f, static_cast<float>(wz) * 0.02f, seed, 5);
-      int height = 58 + static_cast<int>(n * 28.f); // ~58-86
-      // occasional peaks
-      const float ridge = fbm2d(static_cast<float>(wx) * 0.008f, static_cast<float>(wz) * 0.008f,
-                                seed + 99, 3);
-      if (ridge > 0.72f) height += static_cast<int>((ridge - 0.72f) * 40.f);
-      height = std::clamp(height, 8, 120);
-
-      const bool forest_biome = fbm2d(static_cast<float>(wx) * 0.01f,
-                                      static_cast<float>(wz) * 0.01f, seed + 7, 2) > 0.55f;
-      c.setBiome(x, z, forest_biome ? 4 : 1, forest_biome ? forest : plains);
-
-      for (int y = 0; y <= height; ++y) {
-        if (y == 0) {
-          c.setBlock(x, y, z, protocol::BLOCK_BEDROCK);
-        } else if (y < height - 4) {
-          std::uint8_t id = protocol::BLOCK_STONE;
-          // sparse ores in stone
-          const auto oh = hash2(wx * 31 + y, wz * 17 + y * 3, seed + 3);
-          if (y < 16 && (oh % 48) == 0) id = protocol::BLOCK_DIAMOND_ORE;
-          else if (y < 32 && (oh % 24) == 0) id = protocol::BLOCK_GOLD_ORE;
-          else if (y < 64 && (oh % 12) == 0) id = protocol::BLOCK_IRON_ORE;
-          else if ((oh % 8) == 0) id = protocol::BLOCK_COAL_ORE;
-          else if ((oh % 40) == 1) id = protocol::BLOCK_GRAVEL;
-          c.setBlock(x, y, z, id);
-        } else if (y < height) {
-          c.setBlock(x, y, z, protocol::BLOCK_DIRT);
-        } else {
-          // surface: sand near sea level low areas, else grass
-          if (height <= sea && height < 64)
-            c.setBlock(x, y, z, protocol::BLOCK_SAND);
-          else
-            c.setBlock(x, y, z, protocol::BLOCK_GRASS);
-        }
-      }
-      // water fill if below sea
-      if (height < sea) {
-        for (int y = height + 1; y <= sea; ++y) {
-          c.setBlock(x, y, z, protocol::BLOCK_WATER);
-        }
-      }
-      c.setHeight(x, z, static_cast<std::uint8_t>(std::max(height, sea) + 1));
-    }
-  }
-
-  // sparse oak trees (2x2 trunk + leaf blob) — only on grass, not too dense
-  for (int z = 2; z < 14; ++z) {
-    for (int x = 2; x < 14; ++x) {
-      const int wx = (chunk_x << 4) + x;
-      const int wz = (chunk_z << 4) + z;
-      const auto th = hash2(wx, wz, seed + 42);
-      if ((th % 55) != 0) continue;
-      // find surface grass
-      int surface = -1;
-      for (int y = 120; y >= 1; --y) {
-        const auto id = c.getBlockId(x, y, z);
-        if (id == protocol::BLOCK_GRASS) {
-          surface = y;
-          break;
-        }
-        if (id != 0 && id != protocol::BLOCK_LEAVES && id != protocol::BLOCK_LOG) break;
-      }
-      if (surface < 8 || surface > 100) continue;
-      const int trunk_h = 4 + static_cast<int>(th % 3); // 4-6
-      for (int ty = 1; ty <= trunk_h; ++ty) {
-        c.setBlock(x, surface + ty, z, protocol::BLOCK_LOG);
-      }
-      const int top = surface + trunk_h;
-      for (int ly = top - 2; ly <= top + 1; ++ly) {
-        const int r = (ly >= top) ? 1 : 2;
-        for (int dz = -r; dz <= r; ++dz) {
-          for (int dx = -r; dx <= r; ++dx) {
-            if (dx == 0 && dz == 0 && ly <= top) continue;
-            if (std::abs(dx) == r && std::abs(dz) == r && (th & 1)) continue;
-            const int lx = x + dx;
-            const int lz = z + dz;
-            if (lx < 0 || lx >= 16 || lz < 0 || lz >= 16) continue;
-            if (c.getBlockId(lx, ly, lz) == 0) c.setBlock(lx, ly, lz, protocol::BLOCK_LEAVES);
-          }
-        }
-      }
-    }
-  }
-
+  gen::generateNormalChunk(c, seed);
   c.setGenerated(true);
+  c.recomputeHeightMap();
   return c;
 }
 

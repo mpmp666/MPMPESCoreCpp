@@ -29,6 +29,8 @@ add_executable(mpmpes
   src/protocol/MultiProtocol.cpp
   src/item/Recipes.cpp
   src/entity/EntityNbt.cpp
+  src/level/gen/NormalGenerator.cpp
+  src/level/gen/NormalChunk.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp
