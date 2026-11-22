@@ -102,6 +102,9 @@ private:
   // Survival: fall / fire / lava; respawn after death
   // Returns true if damage was applied (not blocked by creative / i-frames / already dead)
   bool damagePlayer(player::Player& p, float amount, const char* cause);
+  void addEffect(player::Player& p, int id, int amplifier, int duration_ticks, bool particles = true);
+  void removeEffect(player::Player& p, int id);
+  void tickPlayerSurvival();
   // PM Living::knockBack — send SetEntityMotion to victim (eid 0) + viewers
   void knockbackPlayer(player::Player& victim, float from_x, float from_z, float base = 0.4f);
   void tickPlayerDamage();

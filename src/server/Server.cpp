@@ -9,6 +9,7 @@
 #include "mpmpes/protocol/MultiProtocol.hpp"
 #include "mpmpes/item/Recipes.hpp"
 #include "mpmpes/entity/EntityNbt.hpp"
+#include "mpmpes/entity/Effects.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -911,6 +912,116 @@ void Server::respawnPlayer(player::Player& p) {
   broadcastPlayerDespawn(p);
   broadcastPlayerSpawn(p);
   syncPlayersToPlayer(p);
+}
+
+void Server::addEffect(player::Player& p, int id, int amplifier, int duration_ticks, bool particles) {
+  const auto* def = entity::effectDef(id);
+  if (!def) return;
+  const bool modify = p.effects_.count(id) > 0;
+  entity::ActiveEffect e;
+  e.id = id;
+  e.amplifier = amplifier;
+  e.duration = duration_ticks;
+  e.particles = particles;
+  // PHP Effect::add: speed/slowness adjust the movement-speed attribute
+  if (id == 1 || id == 2) { // speed / slowness
+    float cur = p.movement_speed_;
+    if (modify) {
+      auto& old = p.effects_[id];
+      cur /= (id == 1 ? (1 + 0.2f * old.amplifier) : (1 - 0.15f * old.amplifier));
+    }
+    p.movement_speed_ = (id == 1) ? cur * (1 + 0.2f * amplifier) : cur * (1 - 0.15f * amplifier);
+    players_->sendPacket(p, protocol::encodeUpdateAttributes(p.entity_id, {{0.f, 3.4e38f, p.movement_speed_, "generic.movementSpeed"}}), true);
+  }
+  p.effects_[id] = e;
+  players_->sendPacket(p, protocol::encodeMobEffect(0, modify ? protocol::MOB_EFFECT_MODIFY : protocol::MOB_EFFECT_ADD,
+                                                    id, amplifier, particles, duration_ticks), true);
+}
+
+void Server::removeEffect(player::Player& p, int id) {
+  auto it = p.effects_.find(id);
+  if (it == p.effects_.end()) return;
+  if (id == 1) { // speed: restore
+    p.movement_speed_ /= (1 + 0.2f * it->second.amplifier);
+    players_->sendPacket(p, protocol::encodeUpdateAttributes(p.entity_id, {{0.f, 3.4e38f, p.movement_speed_, "generic.movementSpeed"}}), true);
+  } else if (id == 2) {
+    p.movement_speed_ /= (1 - 0.15f * it->second.amplifier);
+    players_->sendPacket(p, protocol::encodeUpdateAttributes(p.entity_id, {{0.f, 3.4e38f, p.movement_speed_, "generic.movementSpeed"}}), true);
+  }
+  p.effects_.erase(it);
+  players_->sendPacket(p, protocol::encodeMobEffect(0, protocol::MOB_EFFECT_REMOVE, id, 0, true, 0), true);
+}
+
+void Server::tickPlayerSurvival() {
+  if (!players_) return;
+  for (auto& [_, p] : players_->all()) {
+    if (!p.spawned || !p.level || p.gamemode == 1 || p.death_ticks_ >= 0) continue;
+
+    // ---- potion effects
+    std::vector<int> expired;
+    for (auto& [id, e] : p.effects_) {
+      if (e.duration <= 0) continue;
+      --e.duration;
+      if (entity::effectShouldApply(id, e.amplifier, e.duration)) {
+        switch (id) {
+          case 19: // poison
+            if (p.health > 1) damagePlayer(p, 1.f, "magic");
+            break;
+          case 20: // wither
+            damagePlayer(p, 1.f, "wither");
+            break;
+          case 10: // regeneration
+            if (p.health < 20) {
+              p.health = std::min(20, p.health + 1);
+              players_->sendPacket(p, protocol::encodeSetHealth(p.health), true);
+            }
+            break;
+          case 17: // hunger
+            p.food = std::max(0.f, p.food - 1);
+            break;
+          case 23: // saturation
+            p.food = std::min(20.f, p.food + 1);
+            break;
+          default: break;
+        }
+      }
+      if (e.duration <= 0) expired.push_back(id);
+    }
+    for (int id : expired) removeEffect(p, id);
+
+    // ---- hunger (PHP Player survival tick)
+    if (p.food <= 0) {
+      if (++p.starvation_tick_ >= 20) {
+        p.starvation_tick_ = 0;
+        if (p.health > cfg_.hunger_health) damagePlayer(p, 1.f, "starvation");
+      }
+    }
+    if (p.moving_ && (p.gamemode == 0)) {
+      p.food_usage_time_ += p.sprinting_ ? 500 : 250;
+      if (p.food_usage_time_ >= 200000) {
+        p.food_usage_time_ -= 200000;
+        p.food = std::max(0.f, p.food - 1);
+      }
+    }
+    // heal over time when fed (every 80 ticks)
+    if ((tick_counter_ % 80) == 0 && p.health < 20 && p.food >= 18) {
+      p.health = std::min(20, p.health + 1);
+      players_->sendPacket(p, protocol::encodeSetHealth(p.health), true);
+    }
+    // slow depletion when hurt (PHP foodTick/hungerTimer)
+    if (p.health < 20 && ++p.food_tick_ >= cfg_.hunger_timer) {
+      p.food_tick_ = 0;
+      if (++p.food_depletion_ >= 2) {
+        p.food_depletion_ = 0;
+        p.food = std::max(0.f, p.food - 1);
+      }
+    }
+    // sync hunger attribute when it changes
+    if (p.food != p.food_last_sent_) {
+      p.food_last_sent_ = p.food;
+      players_->sendPacket(p, protocol::encodeUpdateAttributes(p.entity_id, {{0.f, 20.f, p.food, "player.hunger"}}), true);
+    }
+  }
 }
 
 void Server::tickPlayerDamage() {
@@ -3166,6 +3277,68 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     return;
   }
 
+
+  if (cmd == "effect") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /effect <player> <effect> [seconds] [amplifier] [particles] | /effect <player> clear"); return; }
+    player::Player* target = player;
+    std::size_t base = 0;
+    if (auto* t = findPlayerByName(v[0])) { target = t; base = 1; }
+    else if (player) { base = 0; } // first arg may be the effect name
+    if (!target) { reply(RED + "Player not found"); return; }
+    if (v.size() <= base) { reply("Usage: /effect <player> <effect> ..."); return; }
+    if (v[base] == "clear") {
+      for (auto& [id, _] : target->effects_) removeEffect(*target, id);
+      reply("Cleared effects for " + target->username);
+      return;
+    }
+    const auto* def = entity::effectByName(v[base]);
+    if (!def) { reply(RED + "Unknown effect: " + v[base]); return; }
+    int secs = 30, amp = 0;
+    bool particles = true;
+    if (v.size() > base + 1) { bool ok; secs = std::max(1, toInt(v[base+1], ok)); if (!ok) secs = 30; }
+    if (v.size() > base + 2) { bool ok; amp = std::max(0, toInt(v[base+2], ok)); if (!ok) amp = 0; }
+    if (v.size() > base + 3) particles = v[base+3] != "false" && v[base+3] != "0";
+    addEffect(*target, def->id, amp, secs * 20, particles);
+    reply("Gave " + target->username + " " + def->name + " x" + std::to_string(amp) + " for " + std::to_string(secs) + "s");
+    return;
+  }
+
+  if (cmd == "xp") {
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /xp <amount>[L] [player]"); return; }
+    player::Player* target = player;
+    std::string a = v[0];
+    bool levels = false;
+    if (!a.empty() && (a.back() == 'L' || a.back() == 'l')) { levels = true; a.pop_back(); }
+    bool ok = false;
+    int amount = toInt(a, ok);
+    if (!ok) { reply(RED + "Invalid amount: " + a); return; }
+    if (v.size() >= 2) {
+      target = findPlayerByName(v[1]);
+      if (!target) { reply(RED + "Player not found: " + v[1]); return; }
+    }
+    if (!target) { reply("Console: /xp <amount> <player>"); return; }
+    // PHP ExperienceUtils::getLevelFromExp / expToLevelUp
+    auto xpToNext = [](int level) { return level < 16 ? 2 * level + 7 : (level < 31 ? 5 * level - 38 : 9 * level - 158); };
+    if (levels) {
+      target->xp_level += amount;
+      target->xp_progress = 0.f;
+    } else {
+      target->xp_total += amount;
+      target->xp_progress += static_cast<float>(amount);
+      while (target->xp_progress >= xpToNext(target->xp_level)) {
+        target->xp_progress -= static_cast<float>(xpToNext(target->xp_level));
+        ++target->xp_level;
+      }
+    }
+    players_->sendPacket(*target, protocol::encodeUpdateAttributes(target->entity_id,
+        {{0.f, 340282346638528859811704183484516925440.f, static_cast<float>(target->xp_level), "player.level"},
+         {0.f, 1.f, target->xp_progress / static_cast<float>(xpToNext(target->xp_level)), "player.experience"}}), true);
+    reply("Gave " + std::to_string(amount) + (levels ? " levels" : " xp") + " to " + target->username);
+    return;
+  }
+
   reply("Unknown command. Try /help");
   (void)args;
 }
@@ -3675,7 +3848,40 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
 
   item::ItemStack held = u.item.empty() ? p.heldItem() : u.item;
   // face 0xff = air click / eat etc
-  if (u.face == 0xff) return;
+  if (u.face == 0xff) {
+    // Eating (PHP PlayerItemConsumeEvent path): only survival, food < 20
+    static const std::unordered_map<int, std::pair<float, float>> FOODS = {
+        {260, {4, 2.4f}}, {393, {5, 7.2f}}, {457, {1, 1.2f}}, {297, {5, 6.f}},
+        {391, {3, 4.8f}}, {366, {6, 7.2f}}, {320, {8, 12.8f}}, {412, {5, 6.f}},
+        {357, {2, 0.4f}}, {349, {2, 0.4f}}, {350, {5, 6.f}}, {322, {4, 9.6f}},
+        {396, {6, 14.4f}}, {360, {2, 1.2f}}, {282, {6, 7.2f}}, {400, {8, 4.8f}},
+        {413, {10, 12.f}}, {363, {3, 1.8f}}, {365, {2, 1.2f}}, {375, {2, 3.2f}},
+        {364, {8, 12.8f}},
+    };
+    auto fit = FOODS.find(held.id);
+    if (fit != FOODS.end() && p.gamemode != 1 && p.death_ticks_ < 0) {
+      if (p.food < 20.f || held.id == 322) {
+        p.food = std::min(20.f, p.food + fit->second.first);
+        p.saturation = std::min(20.f, p.saturation + fit->second.second);
+        if (held.id == 322) { // golden apple: regen II 30s? PHP: regen amp 4 30s + absorption 2min
+          addEffect(p, 10, 4, 30 * 20, true);
+          addEffect(p, 22, 0, 2 * 60 * 20, true);
+        }
+        // consume one
+        if (u.slot >= 0 && u.slot < 9) {
+          int inv = p.hotbar_link[static_cast<std::size_t>(u.slot)];
+          if (inv >= 0 && inv < static_cast<int>(p.inventory.size()) &&
+              p.inventory[static_cast<std::size_t>(inv)].id == held.id) {
+            auto& s = p.inventory[static_cast<std::size_t>(inv)];
+            if (--s.count == 0) s = item::ItemStack::air();
+          }
+        }
+        players_->sendInventory(p);
+        players_->sendPacket(p, protocol::encodeUpdateAttributes(p.entity_id, {{0.f, 20.f, p.food, "player.hunger"}}), true);
+      }
+    }
+    return;
+  }
 
   // Right-click container / redstone activate (PM onActivate)
   if (p.level) {
@@ -4821,6 +5027,7 @@ void Server::runLoop() {
       tickEntities();
       tickPlayerPortals();
       tickPlayerDamage();
+      tickPlayerSurvival();
       // adopt entities loaded from chunk NBT into the live entity manager
       for (auto& [name, lvl] : levels_.all()) {
         auto pend = lvl->drainPendingEntities();

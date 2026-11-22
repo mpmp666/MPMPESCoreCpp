@@ -41,6 +41,8 @@ struct ServerConfig {
   int spawn_protection = 16;       // blocks; -1 disables
   int view_distance = 8;           // chunk radius cap hint (client radius still wins)
   bool announce_player_achievements = true;
+  int hunger_health = 10;   // starvation stops at this health (genisys hunger-health)
+  int hunger_timer = 80;    // ticks between hurt-depletion (genisys hunger-timer)
 };
 
 } // namespace mpmpes::server

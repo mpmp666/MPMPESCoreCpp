@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mpmpes/item/Item.hpp"
+#include "mpmpes/entity/Effects.hpp"
 #include "mpmpes/level/Level.hpp"
 #include "mpmpes/raklib/Session.hpp"
 #include "mpmpes/raklib/SessionManager.hpp"
@@ -11,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace mpmpes::player {
@@ -40,11 +42,20 @@ struct Player {
   int gamemode = 0; // overwritten by server.properties / players.dat on login
   int health = 20;
   float food = 20.f;          // hunger 0..20 (PM "Hunger" short)
+  int food_tick_ = 0;
+  int starvation_tick_ = 0;
+  int food_usage_time_ = 0;   // accumulates movement exhaustion (200000 = 1 food)
+  int food_depletion_ = 0;
+  bool sprinting_ = false;
+  bool moving_ = false;
+  std::unordered_map<int, entity::ActiveEffect> effects_;
   float saturation = 5.f;
   float exhaustion = 0.f;
   std::int64_t xp_total = 0;
   int xp_level = 0;
   float xp_progress = 0.f;    // 0..1 progress into current level
+  float movement_speed_ = 0.1f;
+  float food_last_sent_ = -1.f;
   int chunk_radius = 4;
   bool spawned = false;
   int selected_hotbar = 0; // 0-8

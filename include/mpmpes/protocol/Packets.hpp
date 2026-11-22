@@ -533,6 +533,42 @@ inline std::string encodeContainerSetData(std::uint8_t window_id, std::int16_t p
 }
 
 // ContainerClose 0xb6
+// UpdateAttributes 0xa6 — long eid, short count, per entry: float min/max/value + string name
+struct AttributeEntry {
+  float min = 0, max = 20, value = 20;
+  std::string name;
+};
+inline std::string encodeUpdateAttributes(std::int64_t eid, const std::vector<AttributeEntry>& entries) {
+  binary::BinaryStream out;
+  out.putByte(UPDATE_ATTRIBUTES_PACKET);
+  out.putLong(eid);
+  out.putShort(static_cast<std::uint16_t>(entries.size()));
+  for (const auto& e : entries) {
+    out.putFloat(e.min);
+    out.putFloat(e.max);
+    out.putFloat(e.value);
+    out.putString(e.name);
+  }
+  return out.buffer();
+}
+
+// MobEffect 0xa5 — eid, eventId, effectId, amplifier, particles, duration
+inline constexpr std::uint8_t MOB_EFFECT_ADD = 1;
+inline constexpr std::uint8_t MOB_EFFECT_MODIFY = 2;
+inline constexpr std::uint8_t MOB_EFFECT_REMOVE = 3;
+inline std::string encodeMobEffect(std::int64_t eid, std::uint8_t event_id, std::uint8_t effect_id,
+                                   std::uint8_t amplifier, bool particles, std::int32_t duration) {
+  binary::BinaryStream out;
+  out.putByte(MOB_EFFECT_PACKET);
+  out.putLong(eid);
+  out.putByte(event_id);
+  out.putByte(effect_id);
+  out.putByte(amplifier);
+  out.putByte(particles ? 1 : 0);
+  out.putInt(duration);
+  return out.buffer();
+}
+
 inline std::string encodeContainerClose(std::uint8_t window_id) {
   binary::BinaryStream out;
   out.putByte(CONTAINER_CLOSE_PACKET);
