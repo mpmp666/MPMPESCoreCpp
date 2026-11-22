@@ -1,6 +1,7 @@
 // End terrain noise stack — 1:1 port of ender/noise/*.
 #include "mpmpes/level/gen/EndGenerator.hpp"
 #include "mpmpes/level/Chunk.hpp"
+#include "mpmpes/level/gen/EndFeatures.hpp"
 
 #include <algorithm>
 
@@ -270,6 +271,34 @@ double EndTerrainNoise::density(int x, int y, int z) {
   return 0.64 * (-0.234375 + bottom * (0.234375 + topSlide));
 }
 
+std::string EndTerrainNoise::biome(int x, int z) {
+  int cx = x >> 4, cz = z >> 4;
+  if (cx * cx + cz * cz <= 4096) return "the_end";
+  double h = islands_.compute((cx * 2 + 1) * 8, (cz * 2 + 1) * 8);
+  if (h > 0.25) return "end_highlands";
+  if (h >= -0.0625) return "end_midlands";
+  return h < -0.21875 ? "small_end_islands" : "end_barrens";
+}
+
+bool EndTerrainNoise::solid(int x, int y, int z) {
+  if (y < 0 || y >= 128) return false;
+  int cx = x >> 4, cz = z >> 4;
+  double nodes[297];
+  chunkNodes(cx, cz, nodes);
+  int lx = x & 15, lz = z & 15;
+  int gx = lx >> 3, gz = lz >> 3, gy = y >> 2;
+  double fy = (y & 3) / 4.0, fx = (lx & 7) / 8.0, fz = (lz & 7) / 8.0;
+  auto n = [&](int a, int b, int g) { return nodes[(a * 3 + b) * 33 + g]; };
+  double n00 = n(gx, gz, gy), n10 = n(gx + 1, gz, gy), n01 = n(gx, gz + 1, gy), n11 = n(gx + 1, gz + 1, gy);
+  double xz00 = n00 + fy * (n(gx, gz, gy + 1) - n00);
+  double xz10 = n10 + fy * (n(gx + 1, gz, gy + 1) - n10);
+  double xz01 = n01 + fy * (n(gx, gz + 1, gy + 1) - n01);
+  double xz11 = n11 + fy * (n(gx + 1, gz + 1, gy + 1) - n11);
+  double z0 = xz00 + fx * (xz10 - xz00);
+  double z1 = xz01 + fx * (xz11 - xz01);
+  return z0 + fz * (z1 - z0) > 0.0;
+}
+
 void EndTerrainNoise::chunkNodes(int cx, int cz, double out[297]) {
   int i = 0;
   for (int gx = 0; gx <= 2; ++gx)
@@ -302,6 +331,9 @@ void generateEndTerrainChunk(level::Chunk& chunk, std::int64_t seed) {
         if (d > 0.0) chunk.setBlock(x, y, z, 121, 0); // END_STONE
       }
     }
+  // End features (spikes, podium, platform, chorus, small islands)
+  EndFeatures features(seed, terrain);
+  features.populate(chunk);
   chunk.setPopulated(true);
 }
 

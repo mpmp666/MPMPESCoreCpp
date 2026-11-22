@@ -81,6 +81,12 @@ class EndTerrainNoise {
 public:
   explicit EndTerrainNoise(std::int64_t seed);
   double density(int x, int y, int z);
+  // 'the_end' near origin, else island-density based (Ender biome())
+  std::string biome(int x, int z);
+  double islandDensity(int x, int z) { return islands_.compute(x, z); }
+  // interpolated density > 0 (EndChunkGrid::solid)
+  bool solid(int x, int y, int z);
+  double islandHeight(int x, int z) { return islands_.height(x, z); }
   // lattice nodes for a chunk: gx,gz in 0..2, gy 0..32 -> 297 values
   void chunkNodes(int cx, int cz, double out[297]);
   static double squeeze(double v) {
