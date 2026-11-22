@@ -104,6 +104,11 @@ struct Entity {
   float target_yaw = 0;
   float speed = 0.12f;
   bool hostile = false;
+  // Mob AI state
+  int hurt_flee_ticks_ = 0;    // animal flees while > 0
+  int attack_cooldown_ = 0;    // ticks until next melee hit
+  std::int64_t ai_target_eid_ = -1; // player runtime eid being chased/followed
+  float hurt_from_x_ = 0.f, hurt_from_z_ = 0.f;
   // Item drop fields
   item::ItemStack item_stack;
   int pickup_delay = 0; // ticks before players can pick up
@@ -481,6 +486,8 @@ public:
       }
 
       --e.wander_ticks;
+      if (e.attack_cooldown_ > 0) --e.attack_cooldown_;
+      if (e.hurt_flee_ticks_ > 0) --e.hurt_flee_ticks_;
 
       // gravity
       if (!e.on_ground) {
@@ -489,30 +496,94 @@ public:
         e.motion_y = 0;
       }
 
-      // wander AI — face target_yaw then walk along PHP direction vector
-      if (e.wander_ticks <= 0) {
-        e.wander_ticks = 40 + (static_cast<int>(id * 17) % 80);
-        std::uniform_real_distribution<float> dist(0.f, 360.f);
-        e.target_yaw = dist(rng_);
-        // sometimes stand still
-        if ((id + e.age) % 5 == 0) {
-          e.motion_x = 0;
-          e.motion_z = 0;
+      // ---- Mob AI layer (PHP VanillaAI26 behaviors, simplified) ----
+      bool ai_driving = false;
+      if (nearest_player_) {
+        auto nearest = [&](float range) {
+          return nearest_player_(e.level, e.x, e.y, e.z, range);
+        };
+        if (e.hostile) {
+          // hostile (zombie): chase nearest survival player in 16 blocks
+          auto [tx, ty, tz, teid, held_id, okv] = nearest(16.f);
+          if (okv) {
+            e.ai_target_eid_ = teid;
+            float ddx = tx - e.x, ddz = tz - e.z;
+            float dist = std::sqrt(ddx * ddx + ddz * ddz);
+            e.target_yaw = -std::atan2(ddx, ddz) * 180.f / 3.14159265f;
+            e.yaw = e.target_yaw;
+            if (dist > 1.2f) {
+              e.motion_x = ddx / std::max(dist, 0.01f) * e.speed;
+              e.motion_z = ddz / std::max(dist, 0.01f) * e.speed;
+              ai_driving = true;
+            } else {
+              e.motion_x = 0;
+              e.motion_z = 0;
+              if (e.attack_cooldown_ <= 0 && mob_attack_) {
+                e.attack_cooldown_ = 20; // 1s
+                mob_attack_(teid, 3.f, e);
+              }
+            }
+          } else {
+            e.ai_target_eid_ = -1;
+          }
+        } else if (e.hurt_flee_ticks_ > 0) {
+          // animal flees from the attacker position
+          float ddx = e.x - e.hurt_from_x_, ddz = e.z - e.hurt_from_z_;
+          float dist = std::sqrt(ddx * ddx + ddz * ddz);
+          if (dist > 0.05f) {
+            e.target_yaw = -std::atan2(ddx, ddz) * 180.f / 3.14159265f;
+            e.yaw = e.target_yaw;
+            e.motion_x = ddx / dist * (e.speed * 2.0f);
+            e.motion_z = ddz / dist * (e.speed * 2.0f);
+            ai_driving = true;
+          }
         } else {
-          float dx = 0, dy = 0, dz = 0;
-          // pitch=0 for upright walking (avoids "upside-down" look)
-          directionVector(e.target_yaw, 0.f, dx, dy, dz);
-          e.motion_x = dx * e.speed;
-          e.motion_z = dz * e.speed;
+          // animal follows a player holding its food (wheat 296) within 8 blocks
+          auto [tx, ty, tz, teid, held_id, okv] = nearest(8.f);
+          // animals only follow players holding food (wheat)
+          if (okv && held_id == 296) {
+            float ddx = tx - e.x, ddz = tz - e.z;
+            float dist = std::sqrt(ddx * ddx + ddz * ddz);
+            if (dist > 1.6f) {
+              e.target_yaw = -std::atan2(ddx, ddz) * 180.f / 3.14159265f;
+              e.yaw = e.target_yaw;
+              e.motion_x = ddx / std::max(dist, 0.01f) * (e.speed * 1.25f);
+              e.motion_z = ddz / std::max(dist, 0.01f) * (e.speed * 1.25f);
+              ai_driving = true;
+            } else {
+              e.motion_x = 0;
+              e.motion_z = 0;
+            }
+          }
+        }
+      }
+
+      if (!ai_driving) {
+        // wander AI — face target_yaw then walk along PHP direction vector
+        if (e.wander_ticks <= 0) {
+          e.wander_ticks = 40 + (static_cast<int>(id * 17) % 80);
+          std::uniform_real_distribution<float> dist(0.f, 360.f);
+          e.target_yaw = dist(rng_);
+          // sometimes stand still
+          if ((id + e.age) % 5 == 0) {
+            e.motion_x = 0;
+            e.motion_z = 0;
+          } else {
+            float dx = 0, dy = 0, dz = 0;
+            // pitch=0 for upright walking (avoids "upside-down" look)
+            directionVector(e.target_yaw, 0.f, dx, dy, dz);
+            e.motion_x = dx * e.speed;
+            e.motion_z = dz * e.speed;
+            e.yaw = e.target_yaw;
+            e.pitch = 0.f;
+          }
+        } else if (e.motion_x != 0.f || e.motion_z != 0.f) {
+          // keep yaw aligned with actual horizontal motion (atan2)
+          // MC yaw: 0 looks +Z, increases clockwise looking down? PHP uses -sin/cos
+          // so yaw matching directionVector means facing = walk direction.
           e.yaw = e.target_yaw;
           e.pitch = 0.f;
         }
-      } else if (e.motion_x != 0.f || e.motion_z != 0.f) {
-        // keep yaw aligned with actual horizontal motion (atan2)
-        // MC yaw: 0 looks +Z, increases clockwise looking down? PHP uses -sin/cos
-        // so yaw matching directionVector means facing = walk direction.
-        e.yaw = e.target_yaw;
-        e.pitch = 0.f;
       }
 
       float nx = e.x + e.motion_x * dt_ticks;
@@ -551,6 +622,14 @@ public:
     return moved;
   }
 
+  // Server provides: nearest living survival player in range of (level,x,z)
+  // -> (x, y, z, player_eid, held_item_id, ok)
+  using NearestPlayerFn = std::function<std::tuple<float, float, float, std::int64_t, int, bool>(level::Level*, float, float, float, float)>;
+  void setNearestPlayerProvider(NearestPlayerFn f) { nearest_player_ = std::move(f); }
+  // Mob melee hit on a player: (player_runtime_eid, damage, mob&)
+  using MobAttackFn = std::function<void(std::int64_t, float, Entity&)>;
+  void setMobAttackHandler(MobAttackFn f) { mob_attack_ = std::move(f); }
+
   std::unordered_map<std::int64_t, Entity>& all() { return entities_; }
   const std::unordered_map<std::int64_t, Entity>& all() const { return entities_; }
 
@@ -577,6 +656,8 @@ public:
 
 private:
   std::int64_t next_eid_ = 1000; // leave room below for players
+  NearestPlayerFn nearest_player_;
+  MobAttackFn mob_attack_;
   std::unordered_map<std::int64_t, Entity> entities_;
   std::mt19937 rng_{std::random_device{}()};
 };

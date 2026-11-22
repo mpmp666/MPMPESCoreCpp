@@ -4568,6 +4568,11 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
   if (!e) return;
 
   e->health -= dmg;
+  if (!e->hostile) {
+    e->hurt_flee_ticks_ = 40;
+    e->hurt_from_x_ = p.x;
+    e->hurt_from_z_ = p.z;
+  }
   const auto hurt_pk = protocol::encodeEntityEvent(e->eid, protocol::ENTITY_EVENT_HURT);
   players_->broadcastNear(e->x, e->y, e->z, 64.f, hurt_pk, e->level, nullptr);
 
@@ -4926,6 +4931,33 @@ void Server::start() {
     }
   });
   autosave_ticks_left_ = cfg_.autosave_seconds > 0 ? cfg_.autosave_seconds * 20 : 0;
+
+  entities_.setNearestPlayerProvider(
+      [this](level::Level* lvl, float x, float y, float z, float range) {
+        float best = range * range;
+        player::Player* bp = nullptr;
+        for (auto& [_, pl] : players_->all()) {
+          if (!pl.spawned || pl.level != lvl || pl.death_ticks_ >= 0 || pl.gamemode == 1) continue;
+          float dx = pl.x - x, dy = pl.y - y, dz = pl.z - z;
+          float d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < best) {
+            best = d2;
+            bp = &pl;
+          }
+        }
+        if (!bp) return std::make_tuple(0.f, 0.f, 0.f, (std::int64_t)-1, 0, false);
+        return std::make_tuple(bp->x, bp->y, bp->z, bp->entity_id, static_cast<int>(bp->heldItem().id), true);
+      });
+  entities_.setMobAttackHandler([this](std::int64_t peid, float dmg, entity::Entity& mob) {
+    for (auto& [_, pl] : players_->all()) {
+      if (pl.spawned && pl.entity_id == peid) {
+        if (damagePlayer(pl, dmg, "mob")) {
+          knockbackPlayer(pl, mob.x, mob.z, 0.35f);
+        }
+        break;
+      }
+    }
+  });
 
   ops_.setPath("ops.txt");
   ops_.load();
