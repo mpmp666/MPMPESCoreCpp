@@ -121,7 +121,7 @@ inline PermLevel commandRequiredLevel(std::string_view cmd) {
       cmd == "kill" || cmd == "say" || cmd == "setblock" || cmd == "fill" || cmd == "difficulty" ||
       cmd == "spawnpoint" || cmd == "setworldspawn" || cmd == "defaultgamemode" ||
       cmd == "whitelist" || cmd == "save" || cmd == "save-all" || cmd == "save-on" ||
-      cmd == "save-off" || cmd == "status" || cmd == "reload" || cmd == "effect" || cmd == "xp")
+      cmd == "save-off" || cmd == "status" || cmd == "reload" || cmd == "effect" || cmd == "xp" || cmd == "enchant")
     return PermLevel::Op;
   // unknown: still Player so we can reply "unknown" rather than silent deny
   return PermLevel::Player;

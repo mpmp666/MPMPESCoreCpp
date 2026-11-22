@@ -10,6 +10,7 @@
 #include "mpmpes/item/Recipes.hpp"
 #include "mpmpes/entity/EntityNbt.hpp"
 #include "mpmpes/entity/Effects.hpp"
+#include "mpmpes/item/Enchantments.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -800,6 +801,25 @@ bool Server::damagePlayer(player::Player& p, float amount, const char* cause) {
   if (p.death_ticks_ >= 0) return false;
   if (p.hurt_cooldown_ > 0) return false;
 
+  // EnchantmentEffects26: armor protection points reduce damage (4%/point, cap 20)
+  {
+    int points = 0;
+    const std::string c = cause ? cause : "";
+    const bool no_prot = c == "void" || c == "suicide" || c == "starvation";
+    if (!no_prot) {
+      for (const auto& a : p.armor) {
+        if (a.empty()) continue;
+        points += item::enchantLevel(a.nbt, 0); // protection
+        if (c == "fire" || c == "lava" || c == "burn")
+          points += 2 * item::enchantLevel(a.nbt, 1);
+        else if (c == "fall") points += 3 * item::enchantLevel(a.nbt, 2);
+        else if (c == "explosion") points += 2 * item::enchantLevel(a.nbt, 3);
+        else if (c == "projectile") points += 2 * item::enchantLevel(a.nbt, 4);
+      }
+      points = std::clamp(points, 0, 20);
+      amount *= 1.0f - points * 0.04f;
+    }
+  }
   p.health = std::max(0, p.health - static_cast<int>(std::ceil(amount)));
   p.hurt_cooldown_ = 10; // ~0.5s i-frames
   players_->sendPacket(p, protocol::encodeSetHealth(p.health), true);
@@ -3339,6 +3359,32 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     return;
   }
 
+
+  if (cmd == "enchant") {
+    auto v = splitArgs(args);
+    if (v.size() < 2) { reply("Usage: /enchant <player> <enchantment> [level]"); return; }
+    auto* target = findPlayerByName(v[0]);
+    if (!target) { reply(RED + "Player not found: " + v[0]); return; }
+    const auto* def = item::enchantByName(v[1]);
+    if (!def) { reply(RED + "Unknown enchantment: " + v[1]); return; }
+    int level = 1;
+    if (v.size() >= 3) { bool ok; level = toInt(v[2], ok); if (!ok) level = 1; }
+    if (level < 1 || level > def->max_level) {
+      reply(RED + "Level must be 1.." + std::to_string(def->max_level) + " for " + def->name);
+      return;
+    }
+    auto held = target->heldItem();
+    if (held.empty()) { reply(RED + target->username + " is not holding an item"); return; }
+    held.nbt = item::setEnchantment(held.nbt, def->id, level);
+    int slot = target->selected_hotbar;
+    int inv = target->hotbar_link[static_cast<std::size_t>(slot)];
+    if (inv >= 0 && inv < static_cast<int>(target->inventory.size()))
+      target->inventory[static_cast<std::size_t>(inv)] = held;
+    players_->sendInventory(*target);
+    reply("Enchanted " + target->username + "'s item with " + def->name + " " + std::to_string(level));
+    return;
+  }
+
   reply("Unknown command. Try /help");
   (void)args;
 }
@@ -4489,6 +4535,8 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
         dmg = 1.f;
         break;
     }
+    // EnchantmentEffects26::sharpnessBonus
+    if (int sh = item::enchantLevel(held.nbt, 9); sh > 0) dmg += 0.5f * (sh + 1);
     // PM: sword/hoe +1 durability on entity; pick/axe/shovel +2
     if (item::isToolItem(held.id)) {
       int wear = 1;

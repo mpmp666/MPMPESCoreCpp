@@ -30,6 +30,7 @@ add_executable(mpmpes
   src/item/Recipes.cpp
   src/entity/EntityNbt.cpp
   src/entity/Effects.cpp
+  src/item/Enchantments.cpp
   src/level/gen/NormalGenerator.cpp
   src/level/gen/NormalChunk.cpp
   src/level/gen/NetherAstralChunk.cpp
