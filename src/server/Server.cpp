@@ -7,6 +7,7 @@
 #include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/protocol/MultiProtocol.hpp"
+#include "mpmpes/item/Recipes.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -4063,11 +4064,23 @@ void Server::handleCraftingEvent(player::Player& p, std::string_view buffer) {
   if (!c.ok) return;
   if (c.output.empty()) return;
 
-  // Accept client craft result into inventory (trust client for stub; creative unlimited)
-  auto result = c.output[0];
+  // PHP Player CRAFTING_EVENT: look up by recipe UUID, validate inputs, consume.
+  auto& reg = item::RecipeRegistry::instance();
+  const item::RecipeEntry* recipe = reg.findByUuid(c.uuid);
+  item::ItemStack result;
+  if (recipe && p.gamemode != 1) {
+    auto crafted = reg.tryCraft(*recipe, c.input, p.inventory);
+    if (!crafted) {
+      players_->sendInventory(p); // resync: client showed an impossible craft
+      return;
+    }
+    result = *crafted;
+  } else {
+    result = c.output[0]; // creative or unknown recipe: accept (PHP $canCraft=true path)
+  }
   if (result.empty()) return;
 
-  if (p.gamemode != 1) {
+  if (p.gamemode != 1 && !recipe) {
     // consume inputs best-effort
     for (const auto& ing : c.input) {
       if (ing.empty()) continue;

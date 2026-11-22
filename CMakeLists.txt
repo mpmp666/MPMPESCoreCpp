@@ -27,6 +27,7 @@ add_executable(mpmpes
   src/level/Region.cpp
   src/nbt/Tag.cpp
   src/protocol/MultiProtocol.cpp
+  src/item/Recipes.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp
@@ -94,4 +95,8 @@ if(MPMPES_BUILD_TESTS)
   target_include_directories(mp_incoming_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(mp_incoming_test PRIVATE ZLIB::ZLIB)
   add_test(NAME mp_incoming_test COMMAND mp_incoming_test)
+  add_executable(mp_crafting_diff tests/mp_crafting_diff.cpp src/item/Recipes.cpp src/protocol/MultiProtocol.cpp src/nbt/Tag.cpp src/binary/BinaryStream.cpp)
+  target_include_directories(mp_crafting_diff PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(mp_crafting_diff PRIVATE ZLIB::ZLIB)
+  add_test(NAME mp_crafting_diff COMMAND mp_crafting_diff WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

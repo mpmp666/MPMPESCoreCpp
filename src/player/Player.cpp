@@ -3,6 +3,7 @@
 #include "mpmpes/binary/BinaryStream.hpp"
 #include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/MultiProtocol.hpp"
+#include "mpmpes/item/Recipes.hpp"
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/util/Logger.hpp"
 
@@ -369,9 +370,13 @@ void PlayerManager::sendCreativeContents(Player& p) {
 }
 
 void PlayerManager::sendCraftingData(Player& p) {
-  // Empty CraftingData: PE 0.14 Windows crashes on open-inventory if recipe table is bad.
-  sendPacket(p, protocol::encodeCraftingDataBasic(/*clean=*/true, /*include_stub_recipes=*/false),
-             true);
+  // Full PocketMine recipe table, filtered per wire family (PHP sendRecipeList).
+  const auto& reg = item::RecipeRegistry::instance();
+  const int fam = protocol::mp::wireFamily(p.protocol);
+  const std::string* buf = &reg.nativeFull();
+  if (fam == protocol::mp::F012) buf = &reg.native012();
+  else if (fam == protocol::mp::F013) buf = &reg.nativeOld();
+  sendPacket(p, *buf, true);
 }
 
 void PlayerManager::sendPlayerListTo(Player& p) {
