@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mpmpes/nbt/Tag.hpp"
 #include "mpmpes/protocol/Info.hpp"
 
 #include <cstdint>
@@ -50,11 +51,39 @@ public:
   bool saveToFile(const std::string& path) const;
   static bool loadFromFile(const std::string& path, Chunk& out);
 
+  // PocketMine McRegion "Level" compound (blocks/data/light/height/biomes + flags).
+  // Entities/TileEntities lists are filled by Level.
+  nbt::TagPtr toNbt() const;
+  static bool fromNbt(const nbt::Tag& level, Chunk& out);
+
+  bool populated() const { return populated_; }
+  void setPopulated(bool v = true) { populated_ = v; dirty_ = true; }
+  bool lightPopulated() const { return light_populated_; }
+  void setLightPopulated(bool v = true) { light_populated_ = v; }
+
+  std::uint8_t getSkyLight(int x, int y, int z) const;
+  void setSkyLight(int x, int y, int z, std::uint8_t v);
+  std::uint8_t getBlockLight(int x, int y, int z) const;
+  void setBlockLight(int x, int y, int z, std::uint8_t v);
+  std::uint8_t getHeight(int x, int z) const { return height_map_[static_cast<std::size_t>((z << 4) | x)]; }
+  std::uint8_t getBiomeId(int x, int z) const {
+    return static_cast<std::uint8_t>(biome_colors_[static_cast<std::size_t>((z << 4) | x)] >> 24);
+  }
+  std::uint32_t getBiomeColor(int x, int z) const {
+    return biome_colors_[static_cast<std::size_t>((z << 4) | x)] & 0xffffff;
+  }
+  // Block extra data (PM BaseFullChunk::getBlockExtraData) key = (x<<11)|(z<<7)|y
+  std::vector<std::pair<std::int32_t, std::int16_t>>& extraData() { return extra_data_; }
+  const std::vector<std::pair<std::int32_t, std::int16_t>>& extraData() const { return extra_data_; }
+
 private:
   int x_ = 0;
   int z_ = 0;
   bool generated_ = false;
   bool dirty_ = false;
+  bool populated_ = true;
+  bool light_populated_ = false;
+  std::vector<std::pair<std::int32_t, std::int16_t>> extra_data_;
   std::vector<std::uint8_t> blocks_;     // 32768
   std::vector<std::uint8_t> data_;       // 16384 nibbles
   std::vector<std::uint8_t> sky_light_;  // 16384

@@ -25,6 +25,8 @@ GeneratorType parseGenerator(std::string_view s) {
   if (s == "nether" || s == "hell" || s == "NETHER" || s == "HELL") return GeneratorType::Nether;
   if (s == "end" || s == "ender" || s == "the_end" || s == "END" || s == "ENDER")
     return GeneratorType::End;
+  if (s == "astral" || s == "ASTRAL") return GeneratorType::Astral;
+  if (s == "DEFAULT" || s == "NORMAL") return GeneratorType::NormalStub;
   return GeneratorType::Flat;
 }
 
@@ -40,7 +42,7 @@ Level::Level(LevelSettings settings) : settings_(std::move(settings)) {
     settings_.spawn = {0, 64, 0};
   } else if (settings_.generator == GeneratorType::Nether) {
     settings_.spawn = {0, 72, 0}; // above lava seas
-  } else if (settings_.generator == GeneratorType::End) {
+  } else if (settings_.generator == GeneratorType::End || settings_.generator == GeneratorType::Astral) {
     settings_.spawn = {0, 65, 0}; // central island platform
   } else {
     settings_.spawn = {0, 72, 0}; // normal hills ~ sea+10
@@ -58,6 +60,8 @@ Chunk Level::generate(int cx, int cz) const {
     case GeneratorType::Nether:
       return generateNetherChunk(cx, cz, settings_.seed);
     case GeneratorType::End:
+      return generateEndChunk(cx, cz, settings_.seed);
+    case GeneratorType::Astral:
       return generateEndChunk(cx, cz, settings_.seed);
   }
   return generateFlatChunk(cx, cz);
@@ -82,11 +86,6 @@ std::string Level::signPath() const {
 
 std::string Level::hopperPath() const {
   return data_path_ + "/hoppers.dat";
-}
-
-bool Level::tryLoadChunk(int cx, int cz, Chunk& out) {
-  if (data_path_.empty()) return false;
-  return Chunk::loadFromFile(chunkPath(cx, cz), out);
 }
 
 Chunk& Level::getOrCreateChunk(int cx, int cz) {
@@ -130,22 +129,6 @@ Chunk& Level::getOrCreateChunk(int cx, int cz) {
     }
   }
   return ins->second;
-}
-
-int Level::saveDirtyChunks(bool force_all) {
-  if (data_path_.empty()) return 0;
-  std::error_code ec;
-  fs::create_directories(data_path_ + "/chunks", ec);
-  int n = 0;
-  std::lock_guard lock(mu_);
-  for (auto& [_, c] : chunks_) {
-    if (!force_all && !c.dirty()) continue;
-    if (c.saveToFile(chunkPath(c.x(), c.z()))) {
-      c.clearDirty();
-      ++n;
-    }
-  }
-  return n;
 }
 
 Level::ChestInv& Level::getOrCreateChest(int x, int y, int z) {
@@ -1101,17 +1084,18 @@ Level& LevelManager::create(LevelSettings settings) {
   // default data path: worlds/<name>
   ptr->setDataPath(std::string("worlds/") + name);
   std::error_code ec;
-  fs::create_directories(ptr->dataPath() + "/chunks", ec);
-  ptr->loadChests();
-  ptr->loadFurnaces();
-  ptr->loadHoppers();
-  ptr->loadSigns();
+  fs::create_directories(ptr->dataPath() + "/region", ec);
+  const bool had_level_dat = ptr->loadLevelData();
+  ptr->migrateLegacyTileFiles();
   // Auto spawn: largest flat plane in 3x3 chunks around 0,0 (columns within 100 of origin).
-  // Flat worlds still scan (fast); result ~0,5,0. Normal/nether/end get a real platform.
-  try {
-    ptr->findAndSetAutoSpawn(/*chunk_radius=*/1, /*max_dist=*/100);
-  } catch (...) {
-    util::Logger::instance().warning("Auto-spawn failed for ", name, "; using default spawn");
+  // Only for brand-new worlds; existing level.dat keeps its SpawnX/Y/Z (PHP parity).
+  if (!had_level_dat) {
+    try {
+      ptr->findAndSetAutoSpawn(/*chunk_radius=*/1, /*max_dist=*/100);
+    } catch (...) {
+      util::Logger::instance().warning("Auto-spawn failed for ", name, "; using default spawn");
+    }
+    ptr->saveLevelData();
   }
   levels_[name] = std::move(level);
   if (!default_) default_ = ptr;
@@ -1143,10 +1127,6 @@ int LevelManager::saveAll(bool force_all) {
   int total = 0;
   for (auto& [name, lvl] : levels_) {
     int n = lvl->saveDirtyChunks(force_all);
-    lvl->saveChests();
-    lvl->saveFurnaces();
-    lvl->saveHoppers();
-    lvl->saveSigns();
     if (n > 0) {
       util::Logger::instance().info("Saved world ", name, " chunks=", n);
     }

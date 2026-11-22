@@ -157,6 +157,136 @@ bool Chunk::loadFromFile(const std::string& path, Chunk& out_chunk) {
   return true;
 }
 
+std::uint8_t Chunk::getSkyLight(int x, int y, int z) const {
+  if (x < 0 || x >= 16 || z < 0 || z >= 16 || y < 0 || y >= kChunkHeight) return 15;
+  return getNibble(sky_light_, blockIndex(x, y, z));
+}
+void Chunk::setSkyLight(int x, int y, int z, std::uint8_t v) {
+  if (x < 0 || x >= 16 || z < 0 || z >= 16 || y < 0 || y >= kChunkHeight) return;
+  setNibble(sky_light_, blockIndex(x, y, z), v);
+}
+std::uint8_t Chunk::getBlockLight(int x, int y, int z) const {
+  if (x < 0 || x >= 16 || z < 0 || z >= 16 || y < 0 || y >= kChunkHeight) return 0;
+  return getNibble(block_light_, blockIndex(x, y, z));
+}
+void Chunk::setBlockLight(int x, int y, int z, std::uint8_t v) {
+  if (x < 0 || x >= 16 || z < 0 || z >= 16 || y < 0 || y >= kChunkHeight) return;
+  setNibble(block_light_, blockIndex(x, y, z), v);
+}
+
+nbt::TagPtr Chunk::toNbt() const {
+  using nbt::Tag;
+  auto lv = Tag::Compound();
+  lv->set("xPos", Tag::Int(x_));
+  lv->set("zPos", Tag::Int(z_));
+  lv->set("LastUpdate", Tag::Long(0));
+  lv->set("LightPopulated", Tag::Byte(light_populated_ ? 1 : 0));
+  lv->set("TerrainPopulated", Tag::Byte(populated_ ? 1 : 0));
+  lv->set("TerrainGenerated", Tag::Byte(generated_ ? 1 : 0));
+  lv->set("V", Tag::Byte(1));
+  lv->set("InhabitedTime", Tag::Long(0));
+  lv->set("Blocks", Tag::ByteArray(std::string(reinterpret_cast<const char*>(blocks_.data()), blocks_.size())));
+  lv->set("Data", Tag::ByteArray(std::string(reinterpret_cast<const char*>(data_.data()), data_.size())));
+  lv->set("SkyLight", Tag::ByteArray(std::string(reinterpret_cast<const char*>(sky_light_.data()), sky_light_.size())));
+  lv->set("BlockLight", Tag::ByteArray(std::string(reinterpret_cast<const char*>(block_light_.data()), block_light_.size())));
+  std::vector<std::int32_t> bc(biome_colors_.begin(), biome_colors_.end());
+  lv->set("BiomeColors", Tag::IntArray(std::move(bc)));
+  std::vector<std::int32_t> hm(height_map_.begin(), height_map_.end());
+  lv->set("HeightMap", Tag::IntArray(std::move(hm)));
+  // ExtraData: BE int count + (int key, short value)
+  std::string ex;
+  auto putI = [&](std::uint32_t v) {
+    ex.push_back(char(v >> 24)); ex.push_back(char(v >> 16)); ex.push_back(char(v >> 8)); ex.push_back(char(v));
+  };
+  putI(static_cast<std::uint32_t>(extra_data_.size()));
+  for (auto& [k, v] : extra_data_) {
+    putI(static_cast<std::uint32_t>(k));
+    ex.push_back(char(static_cast<std::uint16_t>(v) >> 8));
+    ex.push_back(char(v));
+  }
+  lv->set("ExtraData", Tag::ByteArray(std::move(ex)));
+  return lv;
+}
+
+bool Chunk::fromNbt(const nbt::Tag& lv, Chunk& out) {
+  Chunk c(static_cast<int>(lv.getInt("xPos")), static_cast<int>(lv.getInt("zPos")));
+  auto copyBytes = [](const nbt::TagPtr& t, std::vector<std::uint8_t>& dst) {
+    if (!t || t->type != nbt::TAG_ByteArray || t->s.size() != dst.size()) return false;
+    std::memcpy(dst.data(), t->s.data(), dst.size());
+    return true;
+  };
+  bool has_blocks = copyBytes(lv.get("Blocks"), c.blocks_);
+  if (has_blocks) {
+    copyBytes(lv.get("Data"), c.data_);
+    if (!copyBytes(lv.get("SkyLight"), c.sky_light_)) c.sky_light_.assign(kNibbleSize, 0xff);
+    copyBytes(lv.get("BlockLight"), c.block_light_);
+  } else {
+    // Anvil-style Sections (Y-major, 16 high, YZX order)
+    auto secs = lv.get("Sections");
+    if (!secs || secs->type != nbt::TAG_List) return false;
+    for (auto& sec : secs->list) {
+      if (!sec || sec->type != nbt::TAG_Compound) continue;
+      int sy = static_cast<int>(sec->getInt("Y"));
+      if (sy < 0 || sy >= 8) continue;
+      auto bl = sec->get("Blocks");
+      auto da = sec->get("Data");
+      auto sl = sec->get("SkyLight");
+      auto bk = sec->get("BlockLight");
+      if (!bl || bl->s.size() != 4096) continue;
+      for (int y = 0; y < 16; ++y)
+        for (int z = 0; z < 16; ++z)
+          for (int x = 0; x < 16; ++x) {
+            int si = (y << 8) | (z << 4) | x;
+            int wy = sy * 16 + y;
+            int di = blockIndex(x, wy, z);
+            c.blocks_[static_cast<std::size_t>(di)] = static_cast<std::uint8_t>(bl->s[static_cast<std::size_t>(si)]);
+            auto nib = [&](const nbt::TagPtr& t, std::uint8_t def) -> std::uint8_t {
+              if (!t || t->s.size() != 2048) return def;
+              std::uint8_t b = static_cast<std::uint8_t>(t->s[static_cast<std::size_t>(si >> 1)]);
+              return (si & 1) ? (b >> 4) : (b & 0x0f);
+            };
+            setNibble(c.data_, di, nib(da, 0));
+            setNibble(c.sky_light_, di, nib(sl, 15));
+            setNibble(c.block_light_, di, nib(bk, 0));
+          }
+    }
+  }
+  auto bc = lv.get("BiomeColors");
+  if (bc && bc->type == nbt::TAG_IntArray && bc->ia.size() == 256) {
+    for (int i = 0; i < 256; ++i) c.biome_colors_[static_cast<std::size_t>(i)] = static_cast<std::uint32_t>(bc->ia[static_cast<std::size_t>(i)]);
+  } else if (auto bio = lv.get("Biomes"); bio && bio->type == nbt::TAG_ByteArray && bio->s.size() == 256) {
+    for (int i = 0; i < 256; ++i)
+      c.biome_colors_[static_cast<std::size_t>(i)] = (static_cast<std::uint32_t>(static_cast<std::uint8_t>(bio->s[static_cast<std::size_t>(i)])) << 24) | 0x8DB360;
+  }
+  auto hm = lv.get("HeightMap");
+  if (hm && hm->type == nbt::TAG_IntArray && hm->ia.size() == 256) {
+    for (int i = 0; i < 256; ++i) c.height_map_[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(std::clamp(hm->ia[static_cast<std::size_t>(i)], 0, 255));
+  } else {
+    c.recomputeHeightMap();
+  }
+  if (auto ex = lv.get("ExtraData"); ex && ex->type == nbt::TAG_ByteArray && ex->s.size() >= 4) {
+    const auto& b = ex->s;
+    auto rd = [&](std::size_t o) {
+      return (std::uint32_t(std::uint8_t(b[o])) << 24) | (std::uint32_t(std::uint8_t(b[o + 1])) << 16) |
+             (std::uint32_t(std::uint8_t(b[o + 2])) << 8) | std::uint32_t(std::uint8_t(b[o + 3]));
+    };
+    std::uint32_t n = rd(0);
+    std::size_t o = 4;
+    for (std::uint32_t k = 0; k < n && o + 6 <= b.size(); ++k, o += 6) {
+      auto key = static_cast<std::int32_t>(rd(o));
+      auto val = static_cast<std::int16_t>((std::uint16_t(std::uint8_t(b[o + 4])) << 8) | std::uint8_t(b[o + 5]));
+      c.extra_data_.emplace_back(key, val);
+    }
+  }
+  c.light_populated_ = lv.getInt("LightPopulated") > 0;
+  if (lv.has("TerrainGenerated")) c.generated_ = lv.getInt("TerrainGenerated") > 0;
+  else c.generated_ = lv.getInt("TerrainPopulated") > 0 || has_blocks;
+  c.populated_ = lv.getInt("TerrainPopulated", 1) > 0;
+  c.dirty_ = false;
+  out = std::move(c);
+  return true;
+}
+
 std::string Chunk::networkPayload() const {
   // ChunkRequestTask::onRun layout
   std::string out;
@@ -174,11 +304,16 @@ std::string Chunk::networkPayload() const {
     out.push_back(static_cast<char>((c >> 8) & 0xff));
     out.push_back(static_cast<char>(c & 0xff));
   }
-  // extraData: LInt count = 0
-  out.push_back(0);
-  out.push_back(0);
-  out.push_back(0);
-  out.push_back(0);
+  // extraData: LInt count + (LInt key, LShort value)
+  auto putL = [&](std::uint32_t v) {
+    out.push_back(char(v)); out.push_back(char(v >> 8)); out.push_back(char(v >> 16)); out.push_back(char(v >> 24));
+  };
+  putL(static_cast<std::uint32_t>(extra_data_.size()));
+  for (auto& [k, v] : extra_data_) {
+    putL(static_cast<std::uint32_t>(k));
+    out.push_back(char(v));
+    out.push_back(char(static_cast<std::uint16_t>(v) >> 8));
+  }
   // no tiles
   return out;
 }

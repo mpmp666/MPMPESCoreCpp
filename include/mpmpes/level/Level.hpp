@@ -2,6 +2,10 @@
 
 #include "mpmpes/item/Item.hpp"
 #include "mpmpes/level/Chunk.hpp"
+#include "mpmpes/level/Region.hpp"
+#include "mpmpes/nbt/Tag.hpp"
+
+#include <functional>
 
 #include <cstdint>
 #include <memory>
@@ -21,6 +25,7 @@ enum class GeneratorType {
   NormalStub = 2, // overworld infinite-ish hills
   Nether = 3,
   End = 4,
+  Astral = 5, // Genisys astral: end-stone floating islands, no pillars
 };
 
 struct Vec3i {
@@ -109,8 +114,31 @@ public:
 
   // Save dirty chunks (+ optional force all). Returns number of chunks written.
   int saveDirtyChunks(bool force_all = false);
-  // Try load from disk before generate (called inside getOrCreateChunk)
+  // Try load from disk before generate (called inside getOrCreateChunk, mu_ held)
   bool tryLoadChunk(int cx, int cz, Chunk& out);
+  // level.dat (PocketMine McRegion BE gzip NBT "Data" compound)
+  bool loadLevelData();
+  void saveLevelData();
+  bool hasLevelData() const { return level_data_ != nullptr; }
+  nbt::TagPtr levelData() const { return level_data_; }
+  // Import pre-0.6 chests.dat/furnaces.dat/... into region TileEntities
+  void migrateLegacyTileFiles();
+  // Entities stored in chunk NBT that the runtime has not adopted yet (removed on fetch)
+  std::vector<nbt::TagPtr> rawEntitiesInChunk(int cx, int cz);
+  // Hook used on save to serialize live entities of a chunk (called under level lock)
+  using EntitySaver = std::function<std::vector<nbt::TagPtr>(int cx, int cz)>;
+  void setEntitySaver(EntitySaver f) { entity_saver_ = std::move(f); }
+  void markEntitiesDirty() { entities_dirty_ = true; }
+  RegionCache& region();
+
+  // Weather (Genisys level/weather)
+  bool raining() const { return raining_; }
+  bool thundering() const { return thundering_; }
+  void setRaining(bool v) { raining_ = v; }
+  void setThundering(bool v) { thundering_ = v; }
+  void setTimeRunning(bool v) { time_running_ = v; }
+  bool timeRunning() const { return time_running_; }
+  std::int32_t seed() const { return settings_.seed; }
 
   // Simple chest inventories keyed by block pos
   struct ChestInv {
@@ -121,6 +149,7 @@ public:
     int pair_x = 0x80000000;
     int pair_z = 0x80000000;
     bool isPaired() const { return pair_x != static_cast<int>(0x80000000); }
+    std::string custom_name;
   };
   ChestInv& getOrCreateChest(int x, int y, int z);
   ChestInv* getChest(int x, int y, int z);
@@ -218,7 +247,24 @@ private:
   std::unordered_map<std::int64_t, FurnaceInv> furnaces_;
   std::unordered_map<std::int64_t, HopperInv> hoppers_;
   std::unordered_map<std::int64_t, SignTile> signs_;
+
+  void loadTileNbt(const nbt::TagPtr& t, std::int64_t chunk_key);
+  nbt::TagPtr buildChunkNbtLocked(const Chunk& c) const;
+  void saveLevelDataLocked();
+  std::unique_ptr<RegionCache> region_;
+  std::unordered_map<std::int64_t, std::vector<nbt::TagPtr>> raw_tiles_;
+  std::unordered_map<std::int64_t, std::vector<nbt::TagPtr>> raw_entities_;
+  nbt::TagPtr level_data_;
+  bool raining_ = false;
+  bool thundering_ = false;
+  EntitySaver entity_saver_;
+  bool entities_dirty_ = false;
 };
+
+// Item <-> PocketMine NBT (id/Count/Damage/Slot/tag)
+nbt::TagPtr itemToNbt(const item::ItemStack& s, int slot = -1);
+item::ItemStack itemFromNbt(const nbt::Tag& t);
+std::string generatorNameFor(GeneratorType g);
 
 class LevelManager {
 public:

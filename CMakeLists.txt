@@ -23,6 +23,9 @@ add_executable(mpmpes
   src/raklib/SessionManager.cpp
   src/level/Chunk.cpp
   src/level/Level.cpp
+  src/level/LevelStorage.cpp
+  src/level/Region.cpp
+  src/nbt/Tag.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp
