@@ -11,6 +11,7 @@
 #include "mpmpes/entity/EntityNbt.hpp"
 #include "mpmpes/entity/Effects.hpp"
 #include "mpmpes/item/Enchantments.hpp"
+#include "mpmpes/network/QueryRcon.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -2262,6 +2263,17 @@ void Server::handleConsoleLine(std::string line) {
   if (line[0] == '/') line = line.substr(1);
   std::lock_guard lock(console_mu_);
   console_queue_.push(std::move(line));
+}
+
+std::string Server::runCommandBlocking(std::string cmd) {
+  std::string out;
+  std::lock_guard<std::mutex> lock(game_mutex_);
+  dispatchCommand("RCON", PermLevel::Console, cmd, "", nullptr,
+                  [&out](std::string_view m) {
+                    if (!out.empty()) out += "\n";
+                    out += m;
+                  });
+  return out;
 }
 
 void Server::processConsoleQueue() {
@@ -4972,6 +4984,32 @@ void Server::start() {
   started_at_ = std::chrono::steady_clock::now();
   log.info("Bans loaded: names=", bans_.nameCount(), " ips=", bans_.ipCount(),
            " cids=", bans_.cidCount(), " from bans.txt");
+
+  // GameSpy/UT3 query on the game UDP port (PHP QueryHandler)
+  if (cfg_.enable_query) {
+    sessions_->setRawQueryHandler([this](const raklib::Endpoint& ep, std::string_view buf) {
+      network::QueryInfo info;
+      info.hostname = cfg_.motd;
+      info.map = levels_.defaultLevel() ? levels_.defaultLevel()->name() : "world";
+      info.version = cfg_.version_name;
+      info.num_players = players_ ? static_cast<int>(players_->count()) : 0;
+      info.max_players = cfg_.max_players;
+      info.whitelist = cfg_.white_list;
+      info.ip = cfg_.bind;
+      info.port = cfg_.port;
+      auto reply = query_handler_.handle(ep.address, buf, info);
+      if (!reply.empty()) sessions_->sendRaw(reply, ep);
+    });
+    util::Logger::instance().info("Query enabled on port ", cfg_.port);
+  }
+
+  // RCON (SRCDS) on TCP
+  if (cfg_.enable_rcon && !cfg_.rcon_password.empty()) {
+    rcon_.start(cfg_.bind, cfg_.rcon_port, cfg_.rcon_password,
+                [this](std::string cmd) { return runCommandBlocking(std::move(cmd)); });
+  } else if (cfg_.enable_rcon) {
+    util::Logger::instance().warning("RCON requested but rcon.password is empty — not starting");
+  }
 
   sessions_->setHandlers(
       [this](const raklib::Endpoint& ep, const raklib::EncapsulatedPacket& pk) {

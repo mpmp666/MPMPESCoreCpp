@@ -104,6 +104,10 @@ void ServerProperties::applyTo(const std::unordered_map<std::string, std::string
   }
   if (auto* v = get("announce-player-achievements"))
     cfg.announce_player_achievements = (*v != "off" && *v != "false" && *v != "0");
+  if (auto* v = get("enable-query")) cfg.enable_query = (*v == "on" || *v == "true" || *v == "1");
+  if (auto* v = get("enable-rcon")) cfg.enable_rcon = (*v == "on" || *v == "true" || *v == "1");
+  if (auto* v = get("rcon.port")) { try { cfg.rcon_port = (std::uint16_t)std::stoi(*v); } catch (...) {} }
+  if (auto* v = get("rcon.password")) cfg.rcon_password = *v;
   if (auto* v = get("network-compression-level")) {
     try {
       cfg.network_compression_level = std::stoi(*v);

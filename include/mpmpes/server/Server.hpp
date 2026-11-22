@@ -4,6 +4,7 @@
 #include "mpmpes/entity/Entity.hpp"
 #include "mpmpes/level/Level.hpp"
 #include "mpmpes/player/Player.hpp"
+#include "mpmpes/network/QueryRcon.hpp"
 #include "mpmpes/plugin/PluginManager.hpp"
 #include "mpmpes/raklib/SessionManager.hpp"
 #include "mpmpes/raklib/UDPServerSocket.hpp"
@@ -79,6 +80,7 @@ private:
                        std::string_view args, player::Player* player, const CommandReply& reply);
   void handleConsoleLine(std::string line);
   void processConsoleQueue();
+  std::string runCommandBlocking(std::string cmd);
   void consoleThreadMain();
 
   // Moderation: clean disconnect (Disconnect packet + RakNet session close)
@@ -186,9 +188,13 @@ private:
   bool save_enabled_ = true;
   std::chrono::steady_clock::time_point started_at_{};
   int ticks_ = 0;
+  network::QueryHandler query_handler_;
+  network::RconServer rcon_;
   std::thread console_thread_;
   std::mutex console_mu_;
   std::queue<std::string> console_queue_;
+  struct RconJob { std::string cmd; std::string reply; std::atomic<bool>* done; };
+  std::queue<RconJob> rcon_jobs_;
   bool console_thread_started_ = false;
 
   // PE/Genisys delayed redstone (repeaters): decremented each server tick

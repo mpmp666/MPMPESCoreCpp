@@ -112,6 +112,13 @@ int SessionManager::tick() {
 void SessionManager::handlePacket(const std::string& buffer, const Endpoint& from) {
   const auto pid = static_cast<std::uint8_t>(buffer[0]);
 
+  // UT3/GameSpy Query: 0xFE 0xFD ... (no MCPE packet starts with 0xFE)
+  if (pid == 0xfe && buffer.size() > 1 && static_cast<std::uint8_t>(buffer[1]) == 0xfd &&
+      raw_query_) {
+    raw_query_(from, buffer);
+    return;
+  }
+
   if (pid == ID_UNCONNECTED_PING || pid == ID_UNCONNECTED_PING_OPEN_CONNECTIONS) {
     handleUnconnectedPing(buffer, from);
     return;

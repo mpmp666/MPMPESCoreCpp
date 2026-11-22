@@ -43,6 +43,10 @@ struct ServerConfig {
   bool announce_player_achievements = true;
   int hunger_health = 10;   // starvation stops at this health (genisys hunger-health)
   int hunger_timer = 80;    // ticks between hurt-depletion (genisys hunger-timer)
+  bool enable_query = true;      // GameSpy/UT3 server-list query on the game UDP port
+  bool enable_rcon = false;      // SRCDS remote console (TCP)
+  std::uint16_t rcon_port = 19132;
+  std::string rcon_password;
 };
 
 } // namespace mpmpes::server

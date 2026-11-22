@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -25,6 +26,8 @@ public:
 
   double now() const;
 
+  using RawQueryHandler = std::function<void(const Endpoint&, std::string_view)>;
+  void setRawQueryHandler(RawQueryHandler h) { raw_query_ = std::move(h); }
   void setHandlers(EncapsulatedHandler on_encap, SessionOpenHandler on_open,
                    SessionCloseHandler on_close) {
     on_encap_ = std::move(on_encap);
@@ -59,6 +62,7 @@ private:
 
   std::unordered_map<std::string, std::unique_ptr<Session>> sessions_;
 
+  RawQueryHandler raw_query_;
   EncapsulatedHandler on_encap_;
   SessionOpenHandler on_open_;
   SessionCloseHandler on_close_;
