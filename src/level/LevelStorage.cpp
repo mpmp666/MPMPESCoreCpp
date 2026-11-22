@@ -96,7 +96,10 @@ bool Level::tryLoadChunk(int cx, int cz, Chunk& out) {
       }
       if (auto ents = lv->get("Entities"); ents && ents->type == nbt::TAG_List) {
         for (auto& e : ents->list)
-          if (e && e->type == nbt::TAG_Compound) raw_entities_[ck].push_back(e);
+          if (e && e->type == nbt::TAG_Compound) {
+            raw_entities_[ck].push_back(e);
+            pending_entities_.emplace_back(ck, e);
+          }
       }
       if (!out.generated()) return false; // empty placeholder: regenerate
       return true;
@@ -208,11 +211,12 @@ TagPtr Level::buildChunkNbtLocked(const Chunk& c) const {
     for (auto& t : it->second) tiles->list.push_back(t);
   lv->set("TileEntities", tiles);
   auto ents = Tag::List(nbt::TAG_Compound);
-  if (entity_saver_) {
-    for (auto& e : entity_saver_(c.x(), c.z())) ents->list.push_back(e);
-  } else if (auto it = raw_entities_.find(ck); it != raw_entities_.end()) {
+  if (entity_saver_)
+    for (auto& e : entity_saver_(c.x(), c.z()))
+      if (e) ents->list.push_back(e);
+  // entities loaded from disk but not yet adopted stay in raw form
+  if (auto it = raw_entities_.find(ck); it != raw_entities_.end())
     for (auto& e : it->second) ents->list.push_back(e);
-  }
   lv->set("Entities", ents);
   lv->set("TileTicks", Tag::List(nbt::TAG_Compound));
   return lv;
@@ -371,4 +375,24 @@ std::vector<TagPtr> Level::rawEntitiesInChunk(int cx, int cz) {
   return v;
 }
 
+std::vector<std::pair<std::int64_t, nbt::TagPtr>> Level::drainPendingEntities() {
+  std::lock_guard lock(mu_);
+  auto out = std::move(pending_entities_);
+  pending_entities_.clear();
+  for (auto& [ck, tag] : out) {
+    auto it = raw_entities_.find(ck);
+    if (it == raw_entities_.end()) continue;
+    auto& v = it->second;
+    for (auto e = v.begin(); e != v.end(); ++e) {
+      if (*e == tag) {
+        v.erase(e);
+        break;
+      }
+    }
+    if (v.empty()) raw_entities_.erase(it);
+  }
+  return out;
+}
+
 } // namespace mpmpes::level
+

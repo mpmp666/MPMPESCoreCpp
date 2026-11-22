@@ -1086,6 +1086,7 @@ Level& LevelManager::create(LevelSettings settings) {
   std::error_code ec;
   fs::create_directories(ptr->dataPath() + "/region", ec);
   const bool had_level_dat = ptr->loadLevelData();
+  ptr->markFresh(!had_level_dat);
   ptr->migrateLegacyTileFiles();
   // Auto spawn: largest flat plane in 3x3 chunks around 0,0 (columns within 100 of origin).
   // Only for brand-new worlds; existing level.dat keeps its SpawnX/Y/Z (PHP parity).

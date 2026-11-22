@@ -8,6 +8,7 @@
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/protocol/MultiProtocol.hpp"
 #include "mpmpes/item/Recipes.hpp"
+#include "mpmpes/entity/EntityNbt.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -4612,8 +4613,24 @@ void Server::start() {
   defs.gamemode = cfg_.gamemode;
   levels_.loadWorldsFile("worlds.txt", defs);
 
-  // seed mobs in non-void worlds
+  // seed mobs only in brand-new worlds; existing worlds load entities from chunk NBT
   for (auto& [name, lvl] : levels_.all()) {
+    level::Level* lvlp = lvl.get();
+    lvlp->setEntitySaver([this, lvlp](int cx, int cz) {
+      std::vector<nbt::TagPtr> out;
+      for (auto& [_, e] : entities_.all()) {
+        if (e.closed || e.level != lvlp) continue;
+        if (static_cast<int>(std::floor(e.x)) >> 4 != cx ||
+            static_cast<int>(std::floor(e.z)) >> 4 != cz)
+          continue;
+        if (auto t = entity::entityToNbt(e)) out.push_back(t);
+      }
+      return out;
+    });
+    if (!lvl->isFresh()) {
+      log.info("World ", name, ": existing level.dat; entities load from region files");
+      continue;
+    }
     entities_.seedWorld(*lvl, 6);
     log.info("Seeded mobs in ", name, " total entities=", entities_.all().size());
   }
@@ -4804,6 +4821,15 @@ void Server::runLoop() {
       tickEntities();
       tickPlayerPortals();
       tickPlayerDamage();
+      // adopt entities loaded from chunk NBT into the live entity manager
+      for (auto& [name, lvl] : levels_.all()) {
+        auto pend = lvl->drainPendingEntities();
+        for (auto& [ck, tag] : pend) {
+          entity::Entity e;
+          if (!entity::entityFromNbt(*tag, e)) continue;
+          entities_.adopt(std::move(e), lvl.get());
+        }
+      }
       tickAutosave();
       ++tick_counter_;
       ++ticks_;

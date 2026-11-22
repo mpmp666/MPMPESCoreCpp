@@ -28,6 +28,7 @@ add_executable(mpmpes
   src/nbt/Tag.cpp
   src/protocol/MultiProtocol.cpp
   src/item/Recipes.cpp
+  src/entity/EntityNbt.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp

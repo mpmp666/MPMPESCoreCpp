@@ -166,6 +166,22 @@ public:
     return entities_[e.eid];
   }
 
+  // Adopt an entity loaded from disk: assigns a fresh runtime eid, keeps NBT state.
+  Entity& adopt(Entity e, level::Level* level) {
+    e.eid = nextEid();
+    e.level = level;
+    e.closed = false;
+    e.linked_eid = 0;
+    if (isMinecartKind(e.kind)) {
+      if (e.kind == EntityKind::MinecartHopper && e.cart_slots.size() != 5)
+        e.cart_slots.assign(5, item::ItemStack::air());
+      if (e.kind == EntityKind::MinecartChest && e.cart_slots.size() != 27)
+        e.cart_slots.assign(27, item::ItemStack::air());
+    }
+    entities_[e.eid] = std::move(e);
+    return entities_[e.eid];
+  }
+
   // Drop item entity (AddItemEntity network type 64)
   Entity& spawnItem(level::Level* level, float x, float y, float z, item::ItemStack stack,
                     float mx, float my, float mz, int pickup_delay = 10) {

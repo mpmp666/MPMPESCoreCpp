@@ -120,11 +120,16 @@ public:
   bool loadLevelData();
   void saveLevelData();
   bool hasLevelData() const { return level_data_ != nullptr; }
+  // True when the world was created this run (no pre-existing level.dat)
+  bool isFresh() const { return fresh_; }
+  void markFresh(bool v = true) { fresh_ = v; }
   nbt::TagPtr levelData() const { return level_data_; }
   // Import pre-0.6 chests.dat/furnaces.dat/... into region TileEntities
   void migrateLegacyTileFiles();
   // Entities stored in chunk NBT that the runtime has not adopted yet (removed on fetch)
   std::vector<nbt::TagPtr> rawEntitiesInChunk(int cx, int cz);
+  // Entities loaded from disk awaiting adoption by the entity manager (server tick).
+  std::vector<std::pair<std::int64_t, nbt::TagPtr>> drainPendingEntities();
   // Hook used on save to serialize live entities of a chunk (called under level lock)
   using EntitySaver = std::function<std::vector<nbt::TagPtr>(int cx, int cz)>;
   void setEntitySaver(EntitySaver f) { entity_saver_ = std::move(f); }
@@ -254,7 +259,9 @@ private:
   std::unique_ptr<RegionCache> region_;
   std::unordered_map<std::int64_t, std::vector<nbt::TagPtr>> raw_tiles_;
   std::unordered_map<std::int64_t, std::vector<nbt::TagPtr>> raw_entities_;
+  std::vector<std::pair<std::int64_t, nbt::TagPtr>> pending_entities_;
   nbt::TagPtr level_data_;
+  bool fresh_ = false;
   bool raining_ = false;
   bool thundering_ = false;
   EntitySaver entity_saver_;
