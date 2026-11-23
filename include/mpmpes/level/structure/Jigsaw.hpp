@@ -28,6 +28,7 @@ public:
 
   int randomState() const { return random_state_; }
   std::int64_t seed() const { return initial_seed_; }
+  Piece piece(const std::string& key, int x, int y, int z, int rotation);
 
 private:
   struct Conn {
@@ -59,7 +60,6 @@ private:
 
   bool fits(const std::vector<Piece>& candidate, const std::vector<Piece>& existing);
   std::array<int, 6> bounds(const Piece& piece);
-  Piece piece(const std::string& key, int x, int y, int z, int rotation);
   Piece relative(const Piece& parent, const std::string& key, int x, int y, int z, int rotation);
   int accept(const std::vector<Piece>& group, int depth, std::vector<int> ancestors, int context);
   bool collisionFree(const std::vector<Piece>& group, int context, const std::vector<int>& ignore);

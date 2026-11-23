@@ -45,6 +45,7 @@ add_executable(mpmpes
   src/level/structure/EndCityLayout.cpp
   src/level/structure/Loot.cpp
   src/level/structure/Jigsaw.cpp
+  src/level/structure/LegacyBuilder.cpp
   src/level/structure/VillagePlacer.cpp
   src/level/structure/StructureService.cpp
   src/level/structure/Repository.cpp

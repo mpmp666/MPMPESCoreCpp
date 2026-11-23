@@ -50,7 +50,8 @@ public:
   static const util::JsonValue* pools();
   static std::vector<std::string> templateKeys(); // pools.json root ("" if missing)
   static bool has(std::string_view key);
-  static const Template* get(std::string_view key); // lazy-loads + caches
+  static const Template* get(std::string_view key);
+  static bool registerRuntime(const std::string& key, const Template& templ); // procedural legacy templates // lazy-loads + caches
   static int sizeOf(std::string_view key, int out[3]);
   static int groundLevel(std::string_view key);
 

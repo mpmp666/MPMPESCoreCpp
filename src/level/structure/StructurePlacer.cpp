@@ -89,6 +89,7 @@ void placeCityIntoChunk(level::Chunk& chunk, std::int64_t seed, int regionX, int
 // StructurePlacer::chunk — write pieces into the chunk with rotation, tiles, foundations.
 int placePieces(level::Chunk& chunk, const std::vector<Piece>& pieces, int originX, int originY,
                 int originZ, bool foundations) {
+
   const int minX = chunk.x() * 16, minZ = chunk.z() * 16;
   int count = 0;
   for (const auto& piece : pieces) {

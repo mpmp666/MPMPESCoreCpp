@@ -1,5 +1,6 @@
 #include "mpmpes/level/structure/StructureService.hpp"
 #include "mpmpes/level/structure/Jigsaw.hpp"
+#include "mpmpes/level/structure/LegacyBuilder.hpp"
 #include "mpmpes/level/structure/EndCityLayout.hpp"
 #include "mpmpes/level/structure/Repository.hpp"
 #include "mpmpes/level/structure/StructurePlacer.hpp"
@@ -91,7 +92,17 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
     else if (family == "ancient_city") pool = "ancient_city/city_center";
     else if (family == "trail_ruins") pool = "trail_ruins/tower";
     else if (family == "bastion") pool = "bastion/starts";
-    if (family == "igloo") plan.pieces = layout.igloo(variant);
+    static const std::unordered_map<std::string, bool> legacy = {
+        {"desert_pyramid", true}, {"desert_well", true}, {"jungle_temple", true}, {"swamp_hut", true},
+    };
+    if (legacy.count(family)) {
+      // procedural legacy structure: build a single template piece (rotation from hash)
+      LegacyBuilder builder(hash);
+      auto templ = builder.build(family);
+      if (StructureRepository::registerRuntime(family, templ)) {
+        plan.pieces = {layout.piece(family, 0, 0, 0, hash & 3)};
+      }
+    } else if (family == "igloo") plan.pieces = layout.igloo(variant);
     else if (!pool.empty()) plan.pieces = layout.assemble(family, pool, variant);
     else plan.pieces = layout.standalone(family, variant);
     if (!plan.pieces.empty()) {

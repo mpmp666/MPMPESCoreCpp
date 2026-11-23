@@ -113,6 +113,15 @@ int StructureRepository::groundLevel(std::string_view key) {
   return it != ground_levels_.end() ? it->second : 0;
 }
 
+bool StructureRepository::registerRuntime(const std::string& key, const Template& templ) {
+  if (sizes_.count(key)) return true; // already have it
+  sizes_[key] = {templ.size[0], templ.size[1], templ.size[2]};
+  auto t = std::make_shared<Template>(templ);
+  t->key = key;
+  cache_[key] = t;
+  return true;
+}
+
 const Template* StructureRepository::get(std::string_view key) {
   std::string k(key);
   auto it = cache_.find(k);
