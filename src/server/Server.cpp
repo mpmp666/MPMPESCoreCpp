@@ -10,6 +10,7 @@
 #include "mpmpes/item/Recipes.hpp"
 #include "mpmpes/entity/EntityNbt.hpp"
 #include "mpmpes/entity/Effects.hpp"
+#include "mpmpes/item/Anvil.hpp"
 #include "mpmpes/item/Enchantments.hpp"
 #include "mpmpes/level/structure/Repository.hpp"
 #include "mpmpes/level/structure/StructurePlacer.hpp"
@@ -3880,6 +3881,24 @@ void Server::sendEnchantOffers(player::Player& p) {
   players_->sendPacket(p, protocol::encodeEnchantmentList(wire), true);
 }
 
+void Server::openAnvil(player::Player& p, int x, int y, int z) {
+  if (!p.level) return;
+  if (p.open_window_id != 0) closeContainer(p, true);
+  const std::uint8_t wid = nextDynamicWindowId();
+  p.open_window_id = wid;
+  p.open_container_type = protocol::CONTAINER_TYPE_ANVIL;
+  p.open_chest_x = x;
+  p.open_chest_y = y;
+  p.open_chest_z = z;
+  p.anvil_x_ = x;
+  p.anvil_y_ = y;
+  p.anvil_z_ = z;
+  p.anvil_input_ = item::ItemStack::air();
+  p.anvil_addition_ = item::ItemStack::air();
+  players_->sendPacket(
+      p, protocol::encodeContainerOpen(wid, protocol::CONTAINER_TYPE_ANVIL, 3, x, y, z, -1), true);
+}
+
 void Server::openEnchantTable(player::Player& p, int x, int y, int z) {
   if (!p.level) return;
   if (p.open_window_id != 0) closeContainer(p, true);
@@ -4195,6 +4214,10 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
   // Right-click container / redstone activate (PM onActivate)
   if (p.level) {
     const auto bid = p.level->getBlockId(u.x, u.y, u.z);
+    if (bid == protocol::BLOCK_ANVIL) {
+      openAnvil(p, u.x, u.y, u.z);
+      return;
+    }
     if (bid == protocol::BLOCK_ENCHANTING_TABLE) {
       openEnchantTable(p, u.x, u.y, u.z);
       return;
@@ -4436,6 +4459,42 @@ void Server::handleContainerSetSlot(player::Player& p, std::string_view buffer) 
 
   // Creative window 0x79 is server→client only content list; ignore client writes
   if (d.window_id == protocol::WINDOW_CREATIVE) {
+    return;
+  }
+
+  // Anvil window: compute + validate the result on slot 2
+  if (p.open_window_id != 0 && d.window_id == p.open_window_id &&
+      p.open_container_type == protocol::CONTAINER_TYPE_ANVIL) {
+    if (d.slot == 0) { p.anvil_input_ = item::sanitizeSlot(d.item); }
+    else if (d.slot == 1) { p.anvil_addition_ = item::sanitizeSlot(d.item); }
+    else if (d.slot == 2 && !d.item.empty()) {
+      // client took a result: validate via anvilCombine, charge levels + addition
+      auto res = item::anvilCombine(p.anvil_input_, p.anvil_addition_, nullptr, p.gamemode == 1);
+      if (!res) { players_->sendInventory(p); return; }
+      // compare result to what the client submitted (id/damage/ench/nbt-name)
+      auto submitted = item::sanitizeSlot(d.item);
+      bool match = submitted.id == res->item.id && submitted.damage == res->item.damage;
+      if (!match) { players_->sendInventory(p); return; }
+      if (p.gamemode != 1) {
+        if (p.xp_level < res->cost) { players_->sendInventory(p); return; }
+        p.xp_level -= res->cost;
+        // consume input + `consumed` of addition
+        for (auto& s : p.inventory)
+          if (s.id == p.anvil_input_.id && s.count == p.anvil_input_.count) { s = item::ItemStack::air(); break; }
+        int need = res->consumed;
+        for (auto& s : p.inventory) {
+          if (need <= 0) break;
+          if (s.id == p.anvil_addition_.id) {
+            int take = std::min(need, static_cast<int>(s.count));
+            s.count = static_cast<std::uint8_t>(s.count - take);
+            need -= take;
+            if (s.count == 0) s = item::ItemStack::air();
+          }
+        }
+      }
+      players_->sendInventory(p);
+      return;
+    }
     return;
   }
 

@@ -112,7 +112,9 @@ struct Player {
   std::int64_t enchant_seed_ = 0;
   int enchant_bookshelves_ = 0;
   int enchant_table_x_ = 0, enchant_table_y_ = -1, enchant_table_z_ = 0;
-  item::ItemStack open_enchant_item_;    // >=0 while dead awaiting respawn
+  item::ItemStack open_enchant_item_;
+  int anvil_x_ = 0, anvil_y_ = -1, anvil_z_ = 0;
+  item::ItemStack anvil_input_, anvil_addition_;    // >=0 while dead awaiting respawn
 
   // Client sky/atmosphere dim override (any wire value). -1 = follow level.
   // Used by visual-dim experiments without world switch; not remapped/whitelist-filtered.

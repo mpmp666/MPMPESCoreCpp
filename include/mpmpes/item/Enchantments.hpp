@@ -14,6 +14,7 @@ struct EnchantDef {
   int max_level;
   int weight;     // rarity weight
   int min_lo, min_step_lo, max_lo, max_step_hi; // enchantability range params
+  int anvil_cost; // DATA[7] — anvil combine cost per level
   std::uint32_t slots;   // supported (command/anvil)
   std::uint32_t primary; // enchanting-table primary
 };

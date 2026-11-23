@@ -161,6 +161,7 @@ private:
   int countBookshelf(int x, int y, int z, level::Level* lvl);
   void sendEnchantOffers(player::Player& p);
   void openEnchantTable(player::Player& p, int x, int y, int z);
+  void openAnvil(player::Player& p, int x, int y, int z);
   void handleEnchantTransaction(player::Player& p);
   void openFurnace(player::Player& p, int x, int y, int z);
   void openHopper(player::Player& p, int x, int y, int z);
