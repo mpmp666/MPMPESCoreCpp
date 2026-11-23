@@ -4971,6 +4971,12 @@ void Server::start() {
     }
   });
 
+  for (auto& [name, lvl] : levels_.all()) {
+    lvl->setOnBlockUpdate([this, &lvl = *lvl](int x, int y, int z, std::uint8_t id, std::uint8_t meta) {
+      broadcastBlockUpdate(&lvl, x, y, z, id, meta);
+    });
+  }
+
   ops_.setPath("ops.txt");
   ops_.load();
   log.info("Operators loaded: ", ops_.size(), " from ops.txt");
@@ -5146,6 +5152,13 @@ void Server::runLoop() {
       tickPlayerPortals();
       tickPlayerDamage();
       tickPlayerSurvival();
+      // random block ticks (PHP Level::tickChunks, every 2 ticks)
+      if ((tick_counter_ & 1) == 0 && players_) {
+        for (auto& [_, pl] : players_->all()) {
+          if (!pl.spawned || !pl.level) continue;
+          pl.level->randomTickAround(static_cast<int>(pl.x), static_cast<int>(pl.z), 4, tick_rng_);
+        }
+      }
       // adopt entities loaded from chunk NBT into the live entity manager
       for (auto& [name, lvl] : levels_.all()) {
         auto pend = lvl->drainPendingEntities();

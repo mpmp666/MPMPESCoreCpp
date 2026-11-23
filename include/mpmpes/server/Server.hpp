@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <optional>
 #include <queue>
 #include <string>
@@ -188,6 +189,7 @@ private:
   bool save_enabled_ = true;
   std::chrono::steady_clock::time_point started_at_{};
   int ticks_ = 0;
+  std::mt19937 tick_rng_{std::random_device{}()};
   network::QueryHandler query_handler_;
   network::RconServer rcon_;
   std::thread console_thread_;

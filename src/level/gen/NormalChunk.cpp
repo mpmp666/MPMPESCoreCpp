@@ -510,4 +510,8 @@ void generateNormalChunk(Chunk& chunk, std::int64_t seed) {
   chunk.setPopulated(true);
 }
 
+void growTreeForLevel(Chunk& chunk, PmRandom& random, int lx, int y, int lz, int type) {
+  growTree(chunk, random, lx, y, lz, type);
+}
+
 } // namespace mpmpes::level::gen

@@ -6,6 +6,7 @@
 #include "mpmpes/nbt/Tag.hpp"
 
 #include <functional>
+#include <random>
 
 #include <cstdint>
 #include <memory>
@@ -144,6 +145,14 @@ public:
   void setTimeRunning(bool v) { time_running_ = v; }
   bool timeRunning() const { return time_running_; }
   std::int32_t seed() const { return settings_.seed; }
+  // Random block ticks (PHP Level::tickChunks): sample random positions near players,
+  // apply crop growth / grass spread / sapling->tree / cactus/sugarcane growth.
+  void randomTickAround(int player_x, int player_z, int radius_chunks, std::mt19937& rng);
+  // one random-tick update on a block; returns true when a broadcast is needed
+  bool randomTickBlock(int x, int y, int z);
+  // broadcast hook set by the server (block update to nearby players)
+  std::function<void(int x, int y, int z, std::uint8_t id, std::uint8_t meta)> on_block_update_;
+  void setOnBlockUpdate(std::function<void(int, int, int, std::uint8_t, std::uint8_t)> f) { on_block_update_ = std::move(f); }
 
   // Simple chest inventories keyed by block pos
   struct ChestInv {
@@ -265,6 +274,7 @@ private:
   bool raining_ = false;
   bool thundering_ = false;
   EntitySaver entity_saver_;
+  std::mt19937 tick_rng_;
   bool entities_dirty_ = false;
 };
 
