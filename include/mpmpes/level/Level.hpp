@@ -143,6 +143,11 @@ public:
   bool thundering() const { return thundering_; }
   void setRaining(bool v) { raining_ = v; }
   void setThundering(bool v) { thundering_ = v; }
+  // weather auto-cycle (PHP Weather::calcWeather): duration timer + random transitions
+  int weatherNow() const { return weather_now_; }
+  void tickWeather(std::mt19937& rng);
+  std::function<void(bool rain, bool thunder)> on_weather_change_;
+  void setOnWeatherChange(std::function<void(bool, bool)> f) { on_weather_change_ = std::move(f); }
   void setTimeRunning(bool v) { time_running_ = v; }
   bool timeRunning() const { return time_running_; }
   std::int32_t seed() const { return settings_.seed; }
@@ -285,6 +290,9 @@ private:
   bool fresh_ = false;
   bool raining_ = false;
   bool thundering_ = false;
+  int weather_now_ = 0;      // 0 sunny, 1 rain, 2 rain+thunder, 3 thunder
+  int weather_duration_ = 12000;
+  int weather_last_tick_ = 0;
   EntitySaver entity_saver_;
   std::mt19937 tick_rng_;
   struct ScheduledBlock { int x, y, z; int due; };

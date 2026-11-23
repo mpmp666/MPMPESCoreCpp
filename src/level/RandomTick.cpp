@@ -157,4 +157,26 @@ void Level::randomTickAround(int player_x, int player_z, int radius_chunks, std:
   }
 }
 
+void Level::tickWeather(std::mt19937& rng) {
+  // PHP Weather::calcWeather — random sunny<->rain/thunder transitions
+  const int tickDiff = static_cast<int>(tick_counter_) - weather_last_tick_;
+  if (tickDiff <= 0) return;
+  weather_duration_ -= tickDiff;
+  if (weather_duration_ <= 0) {
+    static const int randomWeatherData[10] = {0, 1, 0, 1, 0, 1, 0, 2, 0, 3};
+    // PHP weatherRandomDurationMin/Max defaults: 6000..12000 ticks
+    int duration = 6000 + static_cast<int>(rng() % 6001);
+    if (weather_now_ == 0) {
+      weather_now_ = randomWeatherData[rng() % 10];
+    } else {
+      weather_now_ = 0; // back to sunny
+    }
+    weather_duration_ = duration;
+    raining_ = weather_now_ == 1 || weather_now_ == 2;
+    thundering_ = weather_now_ >= 2;
+    if (on_weather_change_) on_weather_change_(raining_, thundering_);
+  }
+  weather_last_tick_ = static_cast<int>(tick_counter_);
+}
+
 } // namespace mpmpes::level

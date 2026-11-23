@@ -5196,6 +5196,13 @@ void Server::start() {
     lvl->setOnBlockUpdate([this, &lvl = *lvl](int x, int y, int z, std::uint8_t id, std::uint8_t meta) {
       broadcastBlockUpdate(&lvl, x, y, z, id, meta);
     });
+    lvl->setOnWeatherChange([this, &lvl = *lvl](bool rain, bool thunder) {
+      if (!players_) return;
+      if (rain) players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_START_RAIN, 0, 0, 0, 6000), &lvl);
+      else players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_STOP_RAIN, 0, 0, 0, 0), &lvl);
+      if (thunder) players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_START_THUNDER, 0, 0, 0, 6000), &lvl);
+      else players_->broadcastPacket(protocol::encodeLevelEvent(protocol::EVENT_STOP_THUNDER, 0, 0, 0, 0), &lvl);
+    });
   }
 
   ops_.setPath("ops.txt");
@@ -5398,7 +5405,11 @@ void Server::runLoop() {
       tickPlayerPortals();
       tickPlayerDamage();
       tickPlayerSurvival();
-      for (auto& [_, lvl] : levels_.all()) lvl->tickScheduled();
+      for (auto& [_, lvl] : levels_.all()) {
+        lvl->tickScheduled();
+        if (lvl->generator() == level::GeneratorType::NormalStub || lvl->generator() == level::GeneratorType::Flat)
+          lvl->tickWeather(tick_rng_);
+      }
       // random block ticks (PHP Level::tickChunks, every 2 ticks)
       if ((tick_counter_ & 1) == 0 && players_) {
         for (auto& [_, pl] : players_->all()) {
