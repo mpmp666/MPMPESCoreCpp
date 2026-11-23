@@ -12,6 +12,7 @@
 #include "mpmpes/entity/Effects.hpp"
 #include "mpmpes/item/Enchantments.hpp"
 #include "mpmpes/level/structure/Repository.hpp"
+#include "mpmpes/level/structure/StructurePlacer.hpp"
 #include "mpmpes/network/QueryRcon.hpp"
 #include "mpmpes/util/Logger.hpp"
 
@@ -2298,7 +2299,10 @@ void Server::handleConsoleLine(std::string line) {
 std::string Server::runCommandBlocking(std::string cmd) {
   std::string out;
   std::lock_guard<std::mutex> lock(game_mutex_);
-  dispatchCommand("RCON", PermLevel::Console, cmd, "", nullptr,
+  std::string rcmd = cmd, rargs;
+  if (auto sp = cmd.find(' '); sp != std::string::npos) { rcmd = cmd.substr(0, sp); rargs = cmd.substr(sp + 1); }
+  for (auto& c : rcmd) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  dispatchCommand("RCON", PermLevel::Console, rcmd, rargs, nullptr,
                   [&out](std::string_view m) {
                     if (!out.empty()) out += "\n";
                     out += m;
@@ -2993,6 +2997,53 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     return out;
   };
   const std::string RED = std::string("\xc2\xa7") + "c";
+
+  if (cmd == "locate") {
+    auto argv = splitArgs(args);
+    std::string name = argv.size() > 0 ? std::string(argv[0]) : "end_city";
+    for (auto& c : name) c = static_cast<char>(std::tolower(c));
+    if (name == "endcity") name = "end_city";
+    if (name != "end_city") {
+      reply("\u00a7c\u6724\u4e0d\u652f\u6301\u5b9a\u4f4d " + name + "\uff1b\u76ee\u524d\u4ec5\u652f\u6301 end_city\u3002");
+      return;
+    }
+    double px = 0, pz = 0;
+    level::Level* lvl = player ? player->level : levels_.defaultLevel();
+    if (argv.size() >= 3) {
+      try { px = std::stod(std::string(argv[1])); pz = std::stod(std::string(argv[2])); } catch (...) { px = 0; pz = 0; }
+    } else if (player) { px = player->x; pz = player->z; }
+    // end_city lives in the end dimension: use the end world's seed
+    std::int64_t seed = lvl ? lvl->seed() : 0;
+    for (auto& [_, el] : levels_.all())
+      if (el->generator() == level::GeneratorType::End) { seed = el->seed(); break; }
+    level::gen::EndTerrainNoise terrain(seed);
+    struct Cand { long long dist; int rx, rz, ax, az; };
+    std::vector<Cand> cands;
+    int rx0 = static_cast<int>(std::floor(px / (20.0 * 16)));
+    int rz0 = static_cast<int>(std::floor(pz / (20.0 * 16)));
+    for (int rx = rx0 - 40; rx <= rx0 + 40; ++rx)
+      for (int rz = rz0 - 40; rz <= rz0 + 40; ++rz) {
+        auto c = level::structure::cityCandidate(seed, rx, rz);
+        long long dx = c.x - (long long)px, dz = c.z - (long long)pz;
+        cands.push_back({dx * dx + dz * dz, rx, rz, c.x, c.z});
+      }
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+      return a.dist != b.dist ? a.dist < b.dist : (a.rx != b.rx ? a.rx < b.rx : a.rz < b.rz);
+    });
+    std::string out = "\u00a7c\u672a\u627e\u5230\u8fd1\u5904\u7684\u672b\u5730\u57ce\u3002";
+    int checked = 0;
+    for (auto& c : cands) {
+      if (checked++ >= 256) break;
+      if (terrain.biome(c.ax, c.az) != "end_highlands") continue;
+      int y0 = std::min({terrain.surfaceHeight(c.ax, c.az), terrain.surfaceHeight(c.ax, c.az + 5),
+                         terrain.surfaceHeight(c.ax + 5, c.az), terrain.surfaceHeight(c.ax + 5, c.az + 5)}) - 1;
+      if (y0 < 60) continue;
+      out = "\u00a7a\u6700\u8fd1\u7684\u672b\u5730\u57ce\u4f4d\u4e8e (" + std::to_string(c.ax) + ", " + std::to_string(c.az) + ")\uff0c\u8ddd\u79bb\u7ea6 " + std::to_string((int)std::sqrt((double)c.dist)) + " \u683c\u3002";
+      break;
+    }
+    reply(out);
+    return;
+  }
 
   if (cmd == "seed") {
     auto* lvl = (player && player->level) ? player->level : levels_.defaultLevel();
@@ -5039,8 +5090,30 @@ void Server::start() {
     util::Logger::instance().info("Query enabled on port ", cfg_.port);
   }
 
-  // Structure repository (end city templates etc.) — resources/structures next to the data dir
-  level::structure::StructureRepository::init("resources/structures");
+  // Structure repository (end city templates etc.) — search cwd, exe dir, exe dir parent
+  {
+    std::vector<std::string> cands = {"resources/structures", "share/mpmpes/structures"};
+    char exe[4096];
+    auto n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    std::string exedir;
+    if (n > 0) {
+      exe[n] = 0;
+      exedir = exe;
+      auto slash = exedir.find_last_of('/');
+      if (slash != std::string::npos) {
+        auto parent = exedir.substr(0, slash);
+        cands.push_back(parent + "/resources/structures");
+        cands.push_back(parent + "/../resources/structures");
+      }
+    }
+    for (const auto& c : cands) {
+      std::ifstream probe(c + "/manifest.json");
+      if (probe) {
+        level::structure::StructureRepository::init(c);
+        break;
+      }
+    }
+  }
 
   // RCON (SRCDS) on TCP
   if (cfg_.enable_rcon && !cfg_.rcon_password.empty()) {

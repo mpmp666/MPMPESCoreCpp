@@ -1,5 +1,6 @@
 // End city placement — EndCityGenerator (candidate/plan) + StructurePlacer::chunk.
 #include "mpmpes/level/Chunk.hpp"
+#include "mpmpes/level/structure/StructurePlacer.hpp"
 #include "mpmpes/level/structure/EndCityLayout.hpp"
 #include "mpmpes/level/structure/Repository.hpp"
 
@@ -19,10 +20,6 @@ constexpr std::int64_t SALT = 10387313;
 } // namespace
 
 // EndCityGenerator::candidate
-struct CityAnchor {
-  int x, z, chunkX, chunkZ;
-  std::int64_t placement_seed;
-};
 CityAnchor cityCandidate(std::int64_t seed, int rx, int rz) {
   std::int64_t pseed = gen::JavaRandom::addLong(
       gen::JavaRandom::addLong(gen::JavaRandom::multiplyLong(rx, 341873128712LL),
