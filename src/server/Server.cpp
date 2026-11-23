@@ -2310,6 +2310,37 @@ std::string Server::runCommandBlocking(std::string cmd) {
   return out;
 }
 
+std::int64_t Server::scheduleDelayed(int delay_ticks, std::function<void()> fn, std::string owner) {
+  scheduled_tasks_.push_back({next_task_id_++, ticks_ + delay_ticks, 0, std::move(fn), std::move(owner)});
+  return next_task_id_ - 1;
+}
+std::int64_t Server::scheduleRepeating(int period_ticks, std::function<void()> fn, std::string owner) {
+  scheduled_tasks_.push_back({next_task_id_++, ticks_ + period_ticks, period_ticks, std::move(fn), std::move(owner)});
+  return next_task_id_ - 1;
+}
+void Server::cancelTask(std::int64_t id) {
+  scheduled_tasks_.erase(std::remove_if(scheduled_tasks_.begin(), scheduled_tasks_.end(),
+                                        [id](const ScheduledTask& t) { return t.id == id; }),
+                         scheduled_tasks_.end());
+}
+void Server::processScheduledTasks() {
+  if (scheduled_tasks_.empty()) return;
+  std::vector<ScheduledTask> run;
+  std::vector<ScheduledTask> keep;
+  for (auto& t : scheduled_tasks_) {
+    if (t.due <= ticks_) run.push_back(std::move(t));
+    else keep.push_back(std::move(t));
+  }
+  scheduled_tasks_ = std::move(keep);
+  for (auto& t : run) {
+    try { t.fn(); } catch (...) {}
+    if (t.period > 0) {
+      t.due = ticks_ + t.period;
+      scheduled_tasks_.push_back(std::move(t));
+    }
+  }
+}
+
 void Server::processConsoleQueue() {
   std::vector<std::string> batch;
   {
@@ -5569,6 +5600,7 @@ void Server::runLoop() {
     {
       // Game tick: worlds + entities + pickups (network thread holds mutex only briefly)
       std::lock_guard<std::mutex> lock(game_mutex_);
+      processScheduledTasks();
       processConsoleQueue();
       levels_.tickAll();
       tickFurnaces();

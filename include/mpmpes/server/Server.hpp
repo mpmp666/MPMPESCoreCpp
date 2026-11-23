@@ -110,6 +110,11 @@ private:
   void addEffect(player::Player& p, int id, int amplifier, int duration_ticks, bool particles = true);
   void removeEffect(player::Player& p, int id);
   void tickPlayerSurvival();
+public:
+  std::int64_t scheduleDelayed(int delay_ticks, std::function<void()> fn, std::string owner = "");
+  std::int64_t scheduleRepeating(int period_ticks, std::function<void()> fn, std::string owner = "");
+  void cancelTask(std::int64_t id);
+private:
   void triggerFallingBlocks(level::Level* lvl, int x, int y, int z);
   // PM Living::knockBack — send SetEntityMotion to victim (eid 0) + viewers
   void knockbackPlayer(player::Player& victim, float from_x, float from_z, float base = 0.4f);
@@ -197,6 +202,18 @@ private:
   std::chrono::steady_clock::time_point started_at_{};
   int ticks_ = 0;
   std::mt19937 tick_rng_{std::random_device{}()};
+
+  // Plugin/internal task scheduler (PHP ServerScheduler)
+  struct ScheduledTask {
+    std::int64_t id;
+    int due;      // tick
+    int period;   // 0 = one-shot
+    std::function<void()> fn;
+    std::string owner;
+  };
+  std::vector<ScheduledTask> scheduled_tasks_;
+  std::int64_t next_task_id_ = 1;
+  void processScheduledTasks();
   network::QueryHandler query_handler_;
   network::RconServer rcon_;
   std::thread console_thread_;

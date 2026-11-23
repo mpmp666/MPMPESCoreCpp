@@ -17,6 +17,12 @@ struct PluginHostAccess {
   int (*set_sign_text)(void* ctx, const char* world, int x, int y, int z, const char* t1,
                        const char* t2, const char* t3, const char* t4) = nullptr;
   int (*kick_player)(void* ctx, const char* username, const char* reason) = nullptr;
+  // ServerScheduler: delayed/repeating tasks (game-thread callbacks)
+  long long (*schedule_delayed)(void* ctx, int delay_ticks, void (*cb)(void* cbctx),
+                                void* cbctx) = nullptr;
+  long long (*schedule_repeating)(void* ctx, int period_ticks, void (*cb)(void* cbctx),
+                                  void* cbctx) = nullptr;
+  void (*cancel_task)(void* ctx, long long task_id) = nullptr;
 };
 
 void setPluginHostAccess(const PluginHostAccess& access);
