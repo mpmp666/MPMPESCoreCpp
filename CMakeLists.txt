@@ -39,6 +39,7 @@ add_executable(mpmpes
   src/level/gen/EndFeatures.cpp
   src/util/Sha256.cpp
   src/level/RandomTick.cpp
+  src/level/FluidTick.cpp
   src/player/Player.cpp
   src/server/Server.cpp
   src/util/Logger.cpp

@@ -204,7 +204,32 @@ void Server::dismountPlayer(player::Player& p) {
   }
 }
 
+void Server::triggerFallingBlocks(level::Level* lvl, int x, int y, int z) {
+  if (!lvl) return;
+  // sand/gravel (and anvils) with air/liquid below convert to FallingSand entities
+  for (int dy = 0; dy <= 2; ++dy) {
+    int by = y + dy;
+    if (by < 0 || by >= 127) continue;
+    auto id = lvl->getBlockId(x, by, z);
+    if (id != 12 && id != 13 && id != 145) continue; // sand/gravel/anvil
+    auto below = lvl->getBlockId(x, by - 1, z);
+    const bool supported = below != 0 && below != 8 && below != 9 && below != 10 && below != 11;
+    if (supported) continue;
+    auto meta = lvl->getBlockMeta(x, by, z);
+    lvl->setBlock(x, by, z, 0, 0);
+    auto& e = entities_.spawnFallingBlock(lvl, x + 0.5f, static_cast<float>(by), z + 0.5f, id, meta);
+    // broadcast spawn
+    auto metaStr = protocol::encodeFallingBlockMetadata(id, meta);
+    for (auto& [_, pl] : players_->all()) {
+      if (!pl.spawned || pl.level != lvl) continue;
+      players_->sendPacket(pl, protocol::encodeAddEntity(e.eid, 66, e.x, e.y, e.z, 0, 0, 0, 0, 0, metaStr), false);
+      pl.known_entities.insert(e.eid);
+    }
+  }
+}
+
 void Server::breakBlock(player::Player& p, int x, int y, int z) {
+  // (fluid scheduling at the end, after the block becomes air)
   if (!p.level || !p.spawned) return;
   if (y < 0 || y >= 128) return;
 
@@ -337,6 +362,8 @@ void Server::breakBlock(player::Player& p, int x, int y, int z) {
   bev.face = 0;
   plugins_.fireBlock(bev);
   // no per-break info log (was making dig feel laggy on s390x)
+  if (p.level) p.level->onBlockChanged(x, y, z);
+  triggerFallingBlocks(p.level, x, y, z);
 }
 
 void Server::placeBlock(player::Player& p, int x, int y, int z, std::uint8_t face,
@@ -1193,6 +1220,8 @@ void Server::spawnEntityToPlayer(player::Player& p, const entity::Entity& e) {
     std::string meta;
     if (e.kind == entity::EntityKind::Sheep) {
       meta = protocol::encodeSheepMetadata(e.sheep_color, e.sheared);
+    } else if (e.kind == entity::EntityKind::FallingBlock) {
+      meta = protocol::encodeFallingBlockMetadata(e.fall_block_id_, e.fall_block_meta_);
     }
     auto pk = protocol::encodeAddEntity(e.eid, entity::networkType(e.kind), e.x, e.y, e.z, e.yaw,
                                         0.f /*pitch*/, 0.f, 0.f, 0.f, meta);
@@ -5152,6 +5181,7 @@ void Server::runLoop() {
       tickPlayerPortals();
       tickPlayerDamage();
       tickPlayerSurvival();
+      for (auto& [_, lvl] : levels_.all()) lvl->tickScheduled();
       // random block ticks (PHP Level::tickChunks, every 2 ticks)
       if ((tick_counter_ & 1) == 0 && players_) {
         for (auto& [_, pl] : players_->all()) {

@@ -24,6 +24,7 @@ enum class EntityKind {
   MinecartHopper,
   MinecartTNT,
   MinecartChest,
+  FallingBlock,
 };
 
 inline bool isMinecartKind(EntityKind k) {
@@ -43,6 +44,7 @@ inline std::int32_t networkType(EntityKind k) {
     case EntityKind::MinecartHopper: return protocol::ENTITY_MINECART_HOPPER;
     case EntityKind::MinecartTNT: return protocol::ENTITY_MINECART_TNT;
     case EntityKind::MinecartChest: return protocol::ENTITY_MINECART_CHEST;
+    case EntityKind::FallingBlock: return 66; // FallingSand
   }
   return protocol::ENTITY_PIG;
 }
@@ -59,6 +61,7 @@ inline const char* kindName(EntityKind k) {
     case EntityKind::MinecartHopper: return "MinecartHopper";
     case EntityKind::MinecartTNT: return "MinecartTNT";
     case EntityKind::MinecartChest: return "MinecartChest";
+    case EntityKind::FallingBlock: return "FallingSand";
   }
   return "Mob";
 }
@@ -130,6 +133,10 @@ struct Entity {
   std::vector<item::ItemStack> cart_slots; // hopper=5, chest=27
   int cart_cooldown = 0;                   // hopper minecart transfer cooldown
   int tnt_fuse = -1;                       // -1 idle; >=0 primed ticks remaining
+  // FallingSand
+  std::uint8_t fall_block_id_ = 0;
+  std::uint8_t fall_block_meta_ = 0;
+  bool fall_landed_ = false;
 };
 
 class EntityManager {
@@ -184,6 +191,19 @@ public:
         e.cart_slots.assign(27, item::ItemStack::air());
     }
     entities_[e.eid] = std::move(e);
+    return entities_[e.eid];
+  }
+
+  Entity& spawnFallingBlock(level::Level* level, float x, float y, float z, std::uint8_t id, std::uint8_t meta) {
+    Entity e;
+    e.eid = nextEid();
+    e.kind = EntityKind::FallingBlock;
+    e.level = level;
+    e.x = x; e.y = y; e.z = z;
+    e.fall_block_id_ = id;
+    e.fall_block_meta_ = meta;
+    e.on_ground = false;
+    entities_[e.eid] = e;
     return entities_[e.eid];
   }
 
@@ -482,6 +502,45 @@ public:
           e.motion_y = 0.f;
           e.on_ground = true;
         }
+        continue;
+      }
+
+      // FallingSand: gravity falls until ground, then re-materialize as the block
+      if (e.kind == EntityKind::FallingBlock) {
+        e.motion_y -= 0.04f * dt_ticks; // gravity
+        float nx = e.x, ny = e.y + e.motion_y * dt_ticks, nz = e.z;
+        const int bx = static_cast<int>(std::floor(nx));
+        const int bz = static_cast<int>(std::floor(nz));
+        int ground_y = e.level->highestBlockY(bx, bz);
+        float floor_y = static_cast<float>(ground_y + 1);
+        if (ny <= floor_y) {
+          // land: write the block back (or drop as item on non-solid)
+          // PHP FallingSand: land at the rounded position; drop item only onto
+          // non-solid non-air (torch/plant); onto air/solid/liquid -> setBlock.
+          int by = ground_y + 1; // land on top of the surface (PHP rounds the stopped y)
+          if (by < 0) by = 0;
+          auto target = e.level->getBlockId(bx, by, bz);
+          const bool dropAsItem = target != 0 && target != 78 &&
+              target != 8 && target != 9 && target != 10 && target != 11 && [&] {
+                // non-solid check (plants, torches, etc.)
+                switch (target) {
+                  case 6: case 31: case 32: case 37: case 38: case 39: case 40: case 50:
+                  case 55: case 59: case 83: case 63: case 68: case 65: case 66: case 27:
+                  case 28: case 111: case 104: case 105: case 115: case 141: case 142:
+                  case 244: case 245: case 175:
+                    return true;
+                  default: return false;
+                }
+              }();
+          if (!dropAsItem) {
+            e.level->setBlock(bx, by, bz, e.fall_block_id_, e.fall_block_meta_);
+          }
+          e.closed = true;
+          to_erase.push_back(id);
+          continue;
+        }
+        e.y = ny;
+        moved.push_back(&e);
         continue;
       }
 

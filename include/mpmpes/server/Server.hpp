@@ -108,6 +108,7 @@ private:
   void addEffect(player::Player& p, int id, int amplifier, int duration_ticks, bool particles = true);
   void removeEffect(player::Player& p, int id);
   void tickPlayerSurvival();
+  void triggerFallingBlocks(level::Level* lvl, int x, int y, int z);
   // PM Living::knockBack — send SetEntityMotion to victim (eid 0) + viewers
   void knockbackPlayer(player::Player& victim, float from_x, float from_z, float base = 0.4f);
   void tickPlayerDamage();

@@ -315,6 +315,19 @@ inline std::string encodeEmptyMetadata() {
   return m;
 }
 
+// FallingSand metadata: DATA_BLOCK_INFO (key 20, INT) = blockId | (meta << 8)
+inline std::string encodeFallingBlockMetadata(std::uint8_t block_id, std::uint8_t meta) {
+  std::string m;
+  m.push_back(static_cast<char>((DATA_TYPE_INT << 5) | (20 & 0x1f)));
+  std::int32_t v = block_id | (meta << 8);
+  m.push_back(static_cast<char>(v & 0xff));
+  m.push_back(static_cast<char>((v >> 8) & 0xff));
+  m.push_back(static_cast<char>((v >> 16) & 0xff));
+  m.push_back(static_cast<char>((v >> 24) & 0xff));
+  m.push_back(0x7f);
+  return m;
+}
+
 // Sheep metadata: base + DATA_COLOR_INFO (color | 0x10 if sheared)
 inline std::string encodeSheepMetadata(std::uint8_t color, bool sheared) {
   std::string m;

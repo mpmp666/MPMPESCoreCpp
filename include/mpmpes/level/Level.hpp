@@ -154,6 +154,12 @@ public:
   std::function<void(int x, int y, int z, std::uint8_t id, std::uint8_t meta)> on_block_update_;
   void setOnBlockUpdate(std::function<void(int, int, int, std::uint8_t, std::uint8_t)> f) { on_block_update_ = std::move(f); }
 
+  // Scheduled block updates (PHP Level::scheduleUpdate): liquids flow on a delay.
+  void scheduleUpdate(int x, int y, int z, int delay_ticks);
+  void flowTick(int x, int y, int z, std::uint8_t id); // Liquid::onUpdate(SCHEDULED)
+  void tickScheduled();
+  void onBlockChanged(int x, int y, int z); // schedule fluid flow when a neighbor/liquid changes
+
   // Simple chest inventories keyed by block pos
   struct ChestInv {
     int x = 0, y = 0, z = 0;
@@ -275,6 +281,9 @@ private:
   bool thundering_ = false;
   EntitySaver entity_saver_;
   std::mt19937 tick_rng_;
+  struct ScheduledBlock { int x, y, z; int due; };
+  std::vector<ScheduledBlock> scheduled_blocks_;
+  std::int64_t tick_counter_ = 0;
   bool entities_dirty_ = false;
 };
 
