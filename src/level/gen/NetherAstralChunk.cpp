@@ -1,5 +1,6 @@
 // Nether (hell/Nether.php) + Astral (astral/Astral.php) chunk generation.
 #include "mpmpes/level/Chunk.hpp"
+#include "mpmpes/level/structure/StructureService.hpp"
 #include "mpmpes/level/gen/NormalGenerator.hpp"
 
 #include <cmath>
@@ -75,6 +76,25 @@ int firstAirFromBottom(Chunk& chunk, int lx, int lz) {
   return -1;
 }
 } // namespace
+
+int surfaceHeightNether(std::int64_t seed, int x, int z) {
+  // top netherrack y (mirrors the nether terrain loop)
+  PmRandom rng(seed);
+  Simplex noiseBase(rng, 4, 1.0 / 4.0, 1.0 / 64.0);
+  rng.setSeed(seed);
+  const int cx = x >> 4, cz = z >> 4;
+  auto noise = fastNoise3D(noiseBase, 16, 128, 16, 4, 8, 4, cx * 16, 0, cz * 16);
+  const int lx = x & 15, lz = z & 15;
+  const int emptyHeight = 64;
+  const double emptyAmplitude = 1.0, density = 0.5;
+  for (int y = 126; y >= 33; --y) {
+    double nv = (std::abs(emptyHeight - y) / 64.0) * emptyAmplitude -
+                noise[(static_cast<std::size_t>(lx) * 17 + lz) * 129 + y];
+    nv -= 1.0 - density;
+    if (nv > 0) return y;
+  }
+  return 32; // lava sea surface
+}
 
 void generateNetherChunk(Chunk& chunk, std::int64_t seed) {
   const int cx = chunk.x(), cz = chunk.z();
@@ -174,6 +194,7 @@ void generateNetherChunk(Chunk& chunk, std::int64_t seed) {
       }
     }
   }
+  structure::placeStructuresIntoChunk(chunk, seed, 1, cx, cz);
   chunk.setPopulated(true);
 }
 

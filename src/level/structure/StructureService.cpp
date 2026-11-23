@@ -37,6 +37,13 @@ const std::vector<std::pair<std::string, Def>> DEFS = {
     {"ocean_monument", {32, 12, "ocean", {0}}},
     {"buried_treasure", {20, 8, "buried", {0, 7, 2}}},
 };
+// nether families (bastion jigsaw; fortress/fossils/portal standalone)
+const std::vector<std::pair<std::string, Def>> NETHER_DEFS = {
+    {"bastion", {28, 10, "nether", {}}},
+    {"nether_fortress", {28, 10, "nether", {}}},
+    {"nether_fossils", {12, 5, "nether", {}}},
+    {"ruined_portal", {24, 9, "nether", {}}},
+};
 
 int shaNum(const std::string& s) {
   auto raw = util::sha256(s);
@@ -66,7 +73,8 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
   int cx = rx * def.spacing + hash % span;
   int cz = rz * def.spacing + (hash / 97) % span;
   int x = cx * 16 + 8, z = cz * 16 + 8;
-  int height = gen::surfaceHeightAt(seed, x, z);
+  int height = def.mode == "nether" ? gen::surfaceHeightNether(seed, x, z)
+                                    : gen::surfaceHeightAt(seed, x, z);
   int biome = gen::pickBiomeOverworld(seed, x, z);
   const int WATER = 62;
   bool valid = def.biomes.empty() || std::find(def.biomes.begin(), def.biomes.end(), biome) != def.biomes.end();
@@ -82,6 +90,7 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
     else if (family == "pillager_outpost") pool = "pillager_outpost/base_plates";
     else if (family == "ancient_city") pool = "ancient_city/city_center";
     else if (family == "trail_ruins") pool = "trail_ruins/tower";
+    else if (family == "bastion") pool = "bastion/starts";
     if (family == "igloo") plan.pieces = layout.igloo(variant);
     else if (!pool.empty()) plan.pieces = layout.assemble(family, pool, variant);
     else plan.pieces = layout.standalone(family, variant);
@@ -90,8 +99,14 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
       plan.x = x;
       plan.z = z;
       plan.foundations = (def.mode == "surface");
-      if (def.mode == "ocean")
-        plan.y = std::max(4, height + 1) - 0 - StructureRepository::groundLevel(plan.pieces[0].templ);
+      if (def.mode == "nether") {
+        // nether floor approximation: surface of the netherrack terrain
+        int floor = gen::surfaceHeightNether(seed, x, z);
+        if (floor < 34) floor = 34;
+        if (floor > 80) floor = 80;
+        plan.y = floor + 1;
+      } else if (def.mode == "ocean")
+        plan.y = std::max(4, height + 1) - StructureRepository::groundLevel(plan.pieces[0].templ);
       else
         plan.y = height + 1 - StructureRepository::groundLevel(plan.pieces[0].templ);
     }
@@ -103,8 +118,8 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
 void placeStructuresIntoChunk(level::Chunk& chunk, std::int64_t seed, int dimension, int chunkX,
                               int chunkZ) {
   if (dimension == 2) return; // end handled by EndGenerator's city placement
-  if (dimension != 0) return; // nether structures TODO
-  for (const auto& [family, def] : DEFS) {
+  const auto& defs = (dimension == 1) ? NETHER_DEFS : DEFS;
+  for (const auto& [family, def] : defs) {
     const int reach = 8;
     auto floordiv = [](int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); };
     const int minRX = floordiv(chunkX - reach, def.spacing) - 1;

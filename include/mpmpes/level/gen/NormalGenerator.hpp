@@ -68,6 +68,7 @@ inline std::int64_t chunkSeed(std::int64_t seed, int cx, int cz) {
 
 void generateNormalChunk(Chunk& chunk, std::int64_t seed);
 void generateNetherChunk(Chunk& chunk, std::int64_t seed);
+int surfaceHeightNether(std::int64_t seed, int x, int z);
 void generateAstralChunk(Chunk& chunk, std::int64_t seed);
 // in EndGenerator.cpp
 
