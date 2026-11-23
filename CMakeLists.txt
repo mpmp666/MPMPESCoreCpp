@@ -53,6 +53,7 @@ add_executable(mpmpes
   src/player/Player.cpp
   src/server/Server.cpp
   src/server/MapManager.cpp
+  src/frp/FrpClient.cpp
   src/util/Logger.cpp
 )
 
@@ -62,7 +63,7 @@ target_include_directories(mpmpes PRIVATE
 
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
-target_link_libraries(mpmpes PRIVATE Threads::Threads ZLIB::ZLIB ${CMAKE_DL_LIBS})
+target_link_libraries(mpmpes PRIVATE Threads::Threads ZLIB::ZLIB ${CMAKE_DL_LIBS} ssl crypto)
 
 if(MSVC)
   target_compile_options(mpmpes PRIVATE /W4)

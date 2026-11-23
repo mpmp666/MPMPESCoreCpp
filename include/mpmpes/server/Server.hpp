@@ -7,6 +7,7 @@
 #include "mpmpes/network/QueryRcon.hpp"
 #include "mpmpes/plugin/PluginManager.hpp"
 #include "mpmpes/server/MapManager.hpp"
+#include "mpmpes/frp/FrpClient.hpp"
 #include "mpmpes/raklib/SessionManager.hpp"
 #include "mpmpes/raklib/UDPServerSocket.hpp"
 #include "mpmpes/server/Permission.hpp"
@@ -218,6 +219,7 @@ private:
   std::int64_t next_task_id_ = 1;
   void processScheduledTasks();
   MapManager maps_;
+  std::vector<std::unique_ptr<frp::FrpClient>> frp_tunnels_;
   network::QueryHandler query_handler_;
   network::RconServer rcon_;
   std::thread console_thread_;

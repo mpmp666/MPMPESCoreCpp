@@ -19,6 +19,7 @@
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -5571,6 +5572,28 @@ void Server::start() {
     util::Logger::instance().info("Query enabled on port ", cfg_.port);
   }
 
+  // frp tunnels (frp*.toml, PHP FrpManager): connect to frps and forward RakNet UDP
+  {
+    std::error_code ec;
+    if (std::filesystem::exists(".", ec)) {
+      for (const auto& de : std::filesystem::directory_iterator(".", ec)) {
+        const auto name = de.path().filename().string();
+        if (name.size() > 5 && name.rfind("frp", 0) == 0 && name.size() > 5 &&
+            name.compare(name.size() - 5, 5, ".toml") == 0) {
+          frp::FrpConfig conf;
+          if (frp::loadFrpConfig(de.path().string(), conf)) {
+            util::Logger::instance().info("frp tunnel ", name, ": ", conf.proxies.size(), " proxies to ",
+                                          conf.server_addr, ":", conf.server_port);
+            auto client = std::make_unique<frp::FrpClient>(name, conf);
+            client->start();
+            frp_tunnels_.push_back(std::move(client));
+          }
+        }
+      }
+      if (frp_tunnels_.empty()) util::Logger::instance().info("no frp*.toml found, frp disabled");
+    }
+  }
+
   // Structure repository (end city templates etc.) — search cwd, exe dir, exe dir parent
   {
     std::vector<std::string> cands = {"resources/structures", "share/mpmpes/structures"};
@@ -5719,6 +5742,7 @@ void Server::stop() {
     std::lock_guard<std::mutex> lock(game_mutex_);
     saveEverything(true);
   }
+  frp_tunnels_.clear();
   plugins_.disableAll();
 }
 
@@ -5785,6 +5809,7 @@ void Server::runLoop() {
     saveEverything(true);
   }
   socket_.close();
+  frp_tunnels_.clear();
   plugins_.disableAll();
   util::Logger::instance().notice("Server stopped.");
 }
