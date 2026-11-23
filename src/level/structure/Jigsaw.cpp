@@ -308,6 +308,18 @@ bool JigsawLayout::startMatches(const std::string& key) {
   return true;
 }
 
+std::vector<Piece> JigsawLayout::igloo(const std::string& variant) {
+  if (!StructureRepository::has("igloo/top")) return standalone("igloo", variant);
+  int r = random(4);
+  auto top = piece("igloo/top", 0, 0, 0, r);
+  std::vector<Piece> result = {top};
+  if (variant == "top" || (variant != "basement" && random(2) == 0)) return result;
+  int depth = 4 + random(7);
+  for (int i = 0; i < depth; ++i) result.push_back(relative(top, "igloo/middle", 2, -3 * (i + 1), 4, r));
+  result.push_back(relative(top, "igloo/bottom", 0, -3 * depth - 6, -2, r));
+  return result;
+}
+
 std::vector<Piece> JigsawLayout::standalone(const std::string& family, const std::string& variant) {
   if (StructureRepository::has(family))
     return {piece(family, 0, 0, 0, random(4))};

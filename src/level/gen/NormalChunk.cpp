@@ -1,6 +1,6 @@
 // Normal generator chunk pipeline — Normal::generateChunk + populators.
 #include "mpmpes/level/Chunk.hpp"
-#include "mpmpes/level/structure/VillagePlacer.hpp"
+#include "mpmpes/level/structure/StructureService.hpp"
 #include "mpmpes/level/gen/NormalGenerator.hpp"
 
 #include <cmath>
@@ -549,16 +549,8 @@ void generateNormalChunk(Chunk& chunk, std::int64_t seed) {
     for (const auto& pop : popsForBiome(center_biome))
       if (only < 0 || pop.kind == only) runPop(chunk, prng, pop);
   }
-  // villages (26.2): place village pieces AFTER terrain+cover+populators (PHP populateStructures)
-  {
-    const int reach = 8, spacing = 28;
-    auto floordiv = [](int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); };
-    const int minRX = floordiv(cx - reach, spacing) - 1, maxRX = floordiv(cx + reach, spacing);
-    const int minRZ = floordiv(cz - reach, spacing) - 1, maxRZ = floordiv(cz + reach, spacing);
-    for (int rx = minRX; rx <= maxRX; ++rx)
-      for (int rz = minRZ; rz <= maxRZ; ++rz)
-        structure::placeVillageIntoChunk(chunk, seed, rx, rz);
-  }
+  // structures (26.2): AFTER terrain+cover+populators (PHP populateStructures)
+  structure::placeStructuresIntoChunk(chunk, seed, 0, cx, cz);
   chunk.setPopulated(true);
 }
 

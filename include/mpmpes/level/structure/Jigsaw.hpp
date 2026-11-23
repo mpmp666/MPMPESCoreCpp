@@ -14,6 +14,7 @@ public:
   explicit JigsawLayout(std::int64_t seed);
   std::vector<Piece> assemble(const std::string& family, const std::string& pool, const std::string& variant);
   std::vector<Piece> standalone(const std::string& family, const std::string& variant = "");
+  std::vector<Piece> igloo(const std::string& variant = "");
 
   // Park-Miller LCG (PHP $randomState = ($state * 48271) % 2147483647)
   int random(int bound);
