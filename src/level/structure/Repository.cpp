@@ -16,6 +16,8 @@ std::string StructureRepository::dir_;
 std::unordered_map<std::string, std::array<int, 3>> StructureRepository::sizes_;
 std::unordered_map<std::string, std::string> StructureRepository::paths_;
 std::unordered_map<std::string, std::shared_ptr<Template>> StructureRepository::cache_;
+static std::unordered_map<std::string, int> ground_levels_;
+util::JsonPtr StructureRepository::pools_json_;
 
 namespace {
 std::string b64decode(std::string_view in) {
@@ -67,13 +69,32 @@ bool StructureRepository::init(const std::string& dir) {
     for (int i = 0; i < 3; ++i)
       if (auto* v = size->at(i)) sz[i] = v->asInt();
     sizes_[key] = sz;
+    if (auto* gl = entry->get("ground_level")) ground_levels_[key] = gl->asInt();
     std::string fp = file ? file->asStr() : "";
     if (fp.empty()) fp = key + ".json.gz";
     // keys are like "end_city/base_floor" — files live under dir/end_city/base_floor.json.gz
     paths_[key] = fp;
   }
+  if (std::ifstream pin(dir_ + "/pools.json"); pin) {
+    std::string ptext((std::istreambuf_iterator<char>(pin)), {});
+    auto pj = util::jsonParse(ptext);
+    if (pj) pools_json_ = pj;
+  }
   util::Logger::instance().info("Structure repository: ", sizes_.size(), " templates from ", dir_);
   return true;
+}
+
+std::vector<std::string> StructureRepository::templateKeys() {
+  std::vector<std::string> out;
+  out.reserve(sizes_.size());
+  for (const auto& [k, _] : sizes_) out.push_back(k);
+  return out;
+}
+
+const util::JsonValue* StructureRepository::pools() {
+  if (!pools_json_) return nullptr;
+  if (auto* inner = pools_json_->get("pools")) return inner;
+  return pools_json_.get();
 }
 
 bool StructureRepository::has(std::string_view key) { return sizes_.count(std::string(key)) > 0; }
@@ -85,6 +106,11 @@ int StructureRepository::sizeOf(std::string_view key, int out[3]) {
   out[1] = it->second[1];
   out[2] = it->second[2];
   return 1;
+}
+
+int StructureRepository::groundLevel(std::string_view key) {
+  auto it = ground_levels_.find(std::string(key));
+  return it != ground_levels_.end() ? it->second : 0;
 }
 
 const Template* StructureRepository::get(std::string_view key) {
@@ -139,6 +165,23 @@ const Template* StructureRepository::get(std::string_view key) {
         // keep raw json for sign text etc.
       }
       t->tiles.push_back(std::move(tile2));
+    }
+  }
+  if (auto* conns = root->get("connectors")) {
+    for (const auto& c : conns->arr()) {
+      Template::Connector cn;
+      if (auto* pos = c->get("pos"))
+        for (int i = 0; i < 3; ++i)
+          if (auto* v = pos->at(i)) cn.pos[i] = v->asInt();
+      if (auto* f = c->get("front")) cn.front = f->asStr();
+      if (auto* f = c->get("top")) cn.top = f->asStr();
+      if (auto* f = c->get("name")) cn.name = f->asStr();
+      if (auto* f = c->get("target")) cn.target = f->asStr();
+      if (auto* f = c->get("joint")) cn.joint = f->asStr();
+      if (auto* f = c->get("pool")) cn.pool = f->asStr();
+      if (auto* f = c->get("selection_priority")) cn.selection_priority = f->asInt();
+      if (auto* f = c->get("placement_priority")) cn.placement_priority = f->asInt();
+      t->connectors.push_back(std::move(cn));
     }
   }
   if (auto* markers = root->get("markers")) {

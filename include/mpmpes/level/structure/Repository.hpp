@@ -25,6 +25,12 @@ struct Template {
     std::string loot_table;
   };
   std::vector<Tile> tiles;
+  struct Connector {
+    int pos[3] = {0, 0, 0};
+    std::string front = "north", top = "up", name, target, joint, pool;
+    int selection_priority = 0, placement_priority = 0;
+  };
+  std::vector<Connector> connectors;
   struct Marker {
     int pos[3];
     std::string metadata;
@@ -40,10 +46,13 @@ struct Template {
 
 class StructureRepository {
 public:
-  static bool init(const std::string& dir); // loads manifest.json
+  static bool init(const std::string& dir); // loads manifest.json + pools.json
+  static const util::JsonValue* pools();
+  static std::vector<std::string> templateKeys(); // pools.json root ("" if missing)
   static bool has(std::string_view key);
   static const Template* get(std::string_view key); // lazy-loads + caches
   static int sizeOf(std::string_view key, int out[3]);
+  static int groundLevel(std::string_view key);
 
   static std::pair<int, int> rotate(int x, int z, int rotation) {
     switch (rotation & 3) {
@@ -60,6 +69,7 @@ private:
   static std::unordered_map<std::string, std::array<int, 3>> sizes_; // key -> size
   static std::unordered_map<std::string, std::string> paths_;        // key -> file
   static std::unordered_map<std::string, std::shared_ptr<Template>> cache_;
+  static util::JsonPtr pools_json_;
 };
 
 struct Piece {

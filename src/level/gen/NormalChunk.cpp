@@ -1,5 +1,6 @@
 // Normal generator chunk pipeline — Normal::generateChunk + populators.
 #include "mpmpes/level/Chunk.hpp"
+#include "mpmpes/level/structure/VillagePlacer.hpp"
 #include "mpmpes/level/gen/NormalGenerator.hpp"
 
 #include <cmath>
@@ -410,6 +411,47 @@ void runPop(Chunk& chunk, PmRandom& random, const Pop& pop) {
 }
 } // namespace
 
+
+// Overworld biome id at (x,z) (used by structure placement)
+int pickBiomeOverworld(std::int64_t seed, int x, int z) {
+  PmRandom rng(seed);
+  Simplex noiseBase(rng, 4, 1.0 / 4.0, 1.0 / 32.0);
+  rng.setSeed(seed);
+  BiomeSelector selector(rng);
+  return pickBiome(selector, seed, x, z);
+}
+
+// Surface height at (x,z): top solid y, matching the chunk terrain pipeline.
+int surfaceHeightAt(std::int64_t seed, int x, int z) {
+  PmRandom rng(seed);
+  Simplex noiseBase(rng, 4, 1.0 / 4.0, 1.0 / 32.0);
+  rng.setSeed(seed);
+  BiomeSelector selector(rng);
+  const int cx = x >> 4, cz = z >> 4;
+  auto noise = fastNoise3D(noiseBase, 16, 128, 16, 4, 8, 4, cx * 16, 0, cz * 16);
+  const int lx = x & 15, lz = z & 15;
+  double minSum = 0, maxSum = 0, weightSum = 0;
+  for (int sx = -SMOOTH_SIZE; sx <= SMOOTH_SIZE; ++sx)
+    for (int sz = -SMOOTH_SIZE; sz <= SMOOTH_SIZE; ++sz) {
+      const BiomeDef& adj = biomeDef(pickBiome(selector, seed, x + sx, z + sz));
+      double w = kernel(sx, sz);
+      minSum += (adj.min_y - 1) * w;
+      maxSum += adj.max_y * w;
+      weightSum += w;
+    }
+  minSum /= weightSum;
+  maxSum /= weightSum;
+  for (int y = 127; y >= 1; --y) {
+    double noiseAdj = 2 * ((maxSum - y) / (maxSum - minSum)) - 1;
+    double caveLevel = minSum - 10;
+    double distAbove = std::max(0.0, (double)y - caveLevel);
+    noiseAdj = std::min(noiseAdj, 0.4 + distAbove / 10);
+    double nv = noise[(static_cast<std::size_t>(lx) * 17 + lz) * 129 + y] + noiseAdj;
+    if (nv > 0) return y;
+  }
+  return 0;
+}
+
 void generateNormalChunk(Chunk& chunk, std::int64_t seed) {
   const int cx = chunk.x(), cz = chunk.z();
   PmRandom rng(seed);
@@ -506,6 +548,16 @@ void generateNormalChunk(Chunk& chunk, std::int64_t seed) {
     int only = std::getenv("MP_ONLY_POP") ? atoi(std::getenv("MP_ONLY_POP")) : -1;
     for (const auto& pop : popsForBiome(center_biome))
       if (only < 0 || pop.kind == only) runPop(chunk, prng, pop);
+  }
+  // villages (26.2): place village pieces AFTER terrain+cover+populators (PHP populateStructures)
+  {
+    const int reach = 8, spacing = 28;
+    auto floordiv = [](int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); };
+    const int minRX = floordiv(cx - reach, spacing) - 1, maxRX = floordiv(cx + reach, spacing);
+    const int minRZ = floordiv(cz - reach, spacing) - 1, maxRZ = floordiv(cz + reach, spacing);
+    for (int rx = minRX; rx <= maxRX; ++rx)
+      for (int rz = minRZ; rz <= maxRZ; ++rz)
+        structure::placeVillageIntoChunk(chunk, seed, rx, rz);
   }
   chunk.setPopulated(true);
 }

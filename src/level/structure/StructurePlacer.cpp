@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <unordered_map>
 
 namespace mpmpes::level::structure {
@@ -102,6 +103,8 @@ int placePieces(level::Chunk& chunk, const std::vector<Piece>& pieces, int origi
     const Template* templ = StructureRepository::get(piece.templ);
     if (!templ) continue;
     const std::string& data = templ->blocks;
+    // foundation columns: lowest solid block per (x,z) for ground-fill (PHP StructurePlacer)
+    std::map<int, std::pair<int, int>> foundationColumns; // (x<<4|z) -> (y, id)
     for (std::size_t off = 0; off + 8 <= data.size(); off += 8) {
       int rx = (std::uint8_t)data[off] | ((std::uint8_t)data[off + 1] << 8);
       int ry = (std::uint8_t)data[off + 2] | ((std::uint8_t)data[off + 3] << 8);
@@ -121,6 +124,31 @@ int placePieces(level::Chunk& chunk, const std::vector<Piece>& pieces, int origi
       if (id == 0 && piece.ignore_air) continue;
       chunk.setBlock(lx, by, lz, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(meta));
       ++count;
+      if (foundations && piece.y <= 1 && id != 0) {
+        static const int skip[] = {8, 9, 10, 11, 18, 30, 31, 37, 38, 50, 51, 78, 85, 106, 171};
+        bool skipB = false;
+        for (int sid : skip) if (id == sid) { skipB = true; break; }
+        if (!skipB) {
+          int key = (lx << 4) | lz;
+          auto it = foundationColumns.find(key);
+          if (it == foundationColumns.end() || by < it->second.first)
+            foundationColumns[key] = {by, id};
+        }
+      }
+    }
+    // foundation fill (PHP): from lowest block down to terrain (max 18), cobblestone or end_stone
+    if (foundations) {
+      for (const auto& [key, col] : foundationColumns) {
+        int cy = col.first, cid = col.second;
+        if (cy > py + 3) continue;
+        int fx = key >> 4, fz = key & 15;
+        for (int below = cy - 1; below >= std::max(1, cy - 18); --below) {
+          auto cur = chunk.getBlockId(fx, below, fz);
+          if (cur != 0 && cur != 8 && cur != 9 && cur != 31 && cur != 78) break;
+          chunk.setBlock(fx, below, fz, cid == 121 ? 121 : 4, 0);
+          ++count;
+        }
+      }
     }
     // markers: "Chest" markers place a chest block with a loot table (StructurePlacer)
     bool isEndCity = piece.templ.rfind("end_city/", 0) == 0;
