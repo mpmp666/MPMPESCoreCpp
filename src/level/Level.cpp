@@ -4,6 +4,8 @@
 #include "mpmpes/protocol/Packets.hpp"
 #include "mpmpes/level/gen/NormalGenerator.hpp"
 #include "mpmpes/level/gen/EndGenerator.hpp"
+#include "mpmpes/level/structure/StructurePlacer.hpp"
+#include "mpmpes/level/structure/Loot.hpp"
 #include "mpmpes/util/Logger.hpp"
 
 #include <algorithm>
@@ -64,6 +66,16 @@ Chunk Level::generate(int cx, int cz) const {
     case GeneratorType::End: {
       Chunk c(cx, cz);
       gen::generateEndTerrainChunk(c, settings_.seed);
+      // drain structure loot chests recorded during city placement
+      for (const auto& lc : structure::g_pending_loot_chests) {
+        const auto pk = blockPosKey(lc.x, lc.y, lc.z);
+        if (looted_chests_.count(pk)) continue;
+        auto items = structure::endCityLoot(settings_.seed, lc.x, lc.y, lc.z);
+        std::vector<LootSlot> slots;
+        for (const auto& it : items) slots.push_back({it.id, it.meta, it.count});
+        pending_chest_loot_[pk] = std::move(slots);
+      }
+      structure::g_pending_loot_chests.clear();
       c.setGenerated(true);
       return c;
     }
@@ -154,6 +166,24 @@ Level::ChestInv& Level::getOrCreateChest(int x, int y, int z) {
   inv.dirty = true;
   inv.pair_x = static_cast<int>(0x80000000);
   inv.pair_z = static_cast<int>(0x80000000);
+  // structure loot chest (end city): fill on first creation
+  if (auto lit = pending_chest_loot_.find(key); lit != pending_chest_loot_.end() &&
+      !looted_chests_.count(key)) {
+    std::mt19937 rng(static_cast<std::uint32_t>(key));
+    std::vector<int> free_slots;
+    for (int i = 0; i < 27; ++i) free_slots.push_back(i);
+    int si = 0;
+    for (const auto& ls : lit->second) {
+      // scatter into random slots (PHP: LootTable random slot)
+      int idx = si < static_cast<int>(free_slots.size()) ? free_slots[si++] : si;
+      item::ItemStack it;
+      it.id = static_cast<std::uint16_t>(ls.id);
+      it.damage = static_cast<std::uint16_t>(ls.meta);
+      it.count = static_cast<std::uint8_t>(ls.count);
+      if (idx < 27) inv.slots[static_cast<std::size_t>(idx)] = it;
+    }
+    looted_chests_.insert(key);
+  }
   auto [ins, _] = chests_.emplace(key, std::move(inv));
   return ins->second;
 }

@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -161,6 +162,11 @@ public:
   void onBlockChanged(int x, int y, int z); // schedule fluid flow when a neighbor/liquid changes
 
   // Simple chest inventories keyed by block pos
+  // Structure loot chests (end city): position -> loot items filled on first chest open
+  struct LootSlot { int id, meta, count; };
+  mutable std::unordered_map<std::int64_t, std::vector<LootSlot>> pending_chest_loot_;
+  mutable std::unordered_set<std::int64_t> looted_chests_;
+
   struct ChestInv {
     int x = 0, y = 0, z = 0;
     std::vector<item::ItemStack> slots; // 27

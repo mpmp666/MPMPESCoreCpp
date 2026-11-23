@@ -11,6 +11,8 @@
 
 namespace mpmpes::level::structure {
 
+std::vector<PendingLootChest> g_pending_loot_chests;
+
 int placePieces(level::Chunk& chunk, const std::vector<Piece>& pieces, int originX, int originY,
                 int originZ, bool foundations);
 
@@ -120,8 +122,25 @@ int placePieces(level::Chunk& chunk, const std::vector<Piece>& pieces, int origi
       chunk.setBlock(lx, by, lz, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(meta));
       ++count;
     }
-    // chests/tiles: create tile entries via the chunk's tile system? (loot chests)
-    // Markers/entities skipped (End city loot via chests handled by the level).
+    // markers: "Chest" markers place a chest block with a loot table (StructurePlacer)
+    bool isEndCity = piece.templ.rfind("end_city/", 0) == 0;
+    for (const auto& marker : templ->markers) {
+      if (!isEndCity) continue;
+      const std::string& md = marker.metadata;
+      if (md != "Chest" && md != "chest") continue;
+      auto [mx, mz] = StructureRepository::rotate(marker.pos[0], marker.pos[2], rotation);
+      int wx = px + mx, wy = py + marker.pos[1] - 1, wz = pz + mz; // below the marker
+      if ((wx >> 4) != chunk.x() || (wz >> 4) != chunk.z() || wy < 1 || wy > 126) continue;
+      int lx = wx & 15, lz = wz & 15;
+      auto cur = chunk.getBlockId(lx, wy, lz);
+      if (cur != 0 && cur != 54) continue;
+      // facing: default north (5), rotated by piece rotation
+      static const int facing_map[4] = {5, 3, 4, 2}; // north->east->south->west per rotation
+      int meta = facing_map[rotation & 3];
+      chunk.setBlock(lx, wy, lz, 54, static_cast<std::uint8_t>(meta));
+      g_pending_loot_chests.push_back({wx, wy, wz, "minecraft:chests/end_city_treasure"});
+      ++count;
+    }
   }
   return count;
 }

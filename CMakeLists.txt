@@ -41,6 +41,7 @@ add_executable(mpmpes
   src/util/Json.cpp
   src/level/structure/StructurePlacer.cpp
   src/level/structure/EndCityLayout.cpp
+  src/level/structure/Loot.cpp
   src/level/structure/Repository.cpp
   src/level/RandomTick.cpp
   src/level/FluidTick.cpp

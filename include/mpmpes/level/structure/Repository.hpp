@@ -25,6 +25,11 @@ struct Template {
     std::string loot_table;
   };
   std::vector<Tile> tiles;
+  struct Marker {
+    int pos[3];
+    std::string metadata;
+  };
+  std::vector<Marker> markers;
   struct Ent {
     float pos[3];
     std::string id;

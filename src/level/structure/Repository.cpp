@@ -141,6 +141,16 @@ const Template* StructureRepository::get(std::string_view key) {
       t->tiles.push_back(std::move(tile2));
     }
   }
+  if (auto* markers = root->get("markers")) {
+    for (const auto& m : markers->arr()) {
+      Template::Marker mk;
+      if (auto* pos = m->get("pos"))
+        for (int i = 0; i < 3; ++i)
+          if (auto* v = pos->at(i)) mk.pos[i] = v->asInt();
+      if (auto* md = m->get("metadata")) mk.metadata = md->asStr();
+      t->markers.push_back(std::move(mk));
+    }
+  }
   if (auto* ents = root->get("entities")) {
     for (const auto& e : ents->arr()) {
       Template::Ent en;
