@@ -2620,6 +2620,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     if (a.find("chicken") != std::string::npos) kind = entity::EntityKind::Chicken;
     else if (a.find("cow") != std::string::npos) kind = entity::EntityKind::Cow;
     else if (a.find("sheep") != std::string::npos) kind = entity::EntityKind::Sheep;
+    else if (a.find("wolf") != std::string::npos) kind = entity::EntityKind::Wolf;
     else if (a.find("skeleton") != std::string::npos) kind = entity::EntityKind::Skeleton;
     else if (a.find("creeper") != std::string::npos) kind = entity::EntityKind::Creeper;
     else if (a.find("zombie") != std::string::npos) kind = entity::EntityKind::Zombie;
@@ -4617,8 +4618,43 @@ void Server::handleInteract(player::Player& p, std::string_view buffer) {
   const float reach = (p.gamemode == 1) ? 8.f : 6.f;
   if (dist2 > reach * reach) return;
 
-  // Right-click: open chest/hopper minecart inventory, or mount normal/TNT cart / shear sheep
+  // Right-click: feed animals (breeding) / tame wolf / sit wolf / mount carts / shear
   if (i.action == 1) {
+    if (e && (e->kind == entity::EntityKind::Cow || e->kind == entity::EntityKind::Sheep ||
+              e->kind == entity::EntityKind::Pig || e->kind == entity::EntityKind::Chicken)) {
+      // PHP breeding: feed wheat/seeds/carrot -> inLove
+      auto held = p.heldItem();
+      int food = (e->kind == entity::EntityKind::Cow || e->kind == entity::EntityKind::Sheep)
+                     ? 296      // wheat
+                     : (e->kind == entity::EntityKind::Pig ? 391 : 295); // carrot / seeds
+      if (held.id == food && e->in_love_ <= 0 && !e->is_baby_) {
+        e->in_love_ = 600;
+        if (p.gamemode != 1) {
+          auto& h = p.heldItem();
+          if (--h.count == 0) h = item::ItemStack::air();
+          players_->sendInventory(p);
+        }
+        // heart particles
+        players_->broadcastNear(e->x, e->y + 1, e->z, 16.f,
+            protocol::encodeLevelEvent(3500 + 1, e->x, e->y + 1.5f, e->z, 0), p.level, nullptr);
+        return;
+      }
+    }
+    if (e && e->kind == entity::EntityKind::Wolf) {
+      auto held = p.heldItem();
+      if (held.id == 352 && !e->tamed_) { // bone
+        e->tamed_ = true;
+        e->owner_name_ = p.username;
+        if (p.gamemode != 1) { auto& h = p.heldItem(); if (--h.count == 0) h = item::ItemStack::air(); players_->sendInventory(p); }
+        players_->broadcastNear(e->x, e->y + 1, e->z, 16.f,
+            protocol::encodeLevelEvent(3500 + 1, e->x, e->y + 1.5f, e->z, 0), p.level, nullptr);
+        return;
+      }
+      if (e->tamed_ && e->owner_name_ == p.username) {
+        e->sitting_ = !e->sitting_;
+        return;
+      }
+    }
     if (!e) return;
     if (entity::isMinecartKind(e->kind)) {
       // Already riding this cart → dismount
@@ -5138,6 +5174,14 @@ void Server::start() {
     }
     if (!best) return false;
     if (damage > 0.f) damagePlayer(*best, 2.f, "arrow");
+    return true;
+  });
+
+  entities_.setPlayerPos([this](level::Level* lvl, const std::string& name, float& x, float& y, float& z) {
+    if (!players_) return false;
+    auto* pl = findPlayerByName(name);
+    if (!pl || !pl->spawned || pl->level != lvl) return false;
+    x = pl->x; y = pl->y; z = pl->z;
     return true;
   });
 

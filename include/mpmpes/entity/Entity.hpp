@@ -29,6 +29,7 @@ enum class EntityKind {
   Snowball,
   Skeleton,
   Creeper,
+  Wolf,
 };
 
 inline bool isMinecartKind(EntityKind k) {
@@ -53,6 +54,7 @@ inline std::int32_t networkType(EntityKind k) {
     case EntityKind::Snowball: return 81;
     case EntityKind::Skeleton: return 34;
     case EntityKind::Creeper: return 33;
+    case EntityKind::Wolf: return 14;
   }
   return protocol::ENTITY_PIG;
 }
@@ -74,6 +76,7 @@ inline const char* kindName(EntityKind k) {
     case EntityKind::Snowball: return "Snowball";
     case EntityKind::Skeleton: return "Skeleton";
     case EntityKind::Creeper: return "Creeper";
+    case EntityKind::Wolf: return "Wolf";
   }
   return "Mob";
 }
@@ -155,6 +158,13 @@ struct Entity {
   // creeper swell / skeleton shoot cooldown
   int swell_ = 0;
   bool exploding_ = false;
+  // animal breeding / taming
+  int in_love_ = 0;        // PHP Animal::inLove (>0 = love mode)
+  bool tamed_ = false;
+  std::string owner_name_;
+  bool sitting_ = false;
+  bool is_baby_ = false;
+  int grow_ticks_ = 0;
 };
 
 class EntityManager {
@@ -614,6 +624,23 @@ public:
         continue;
       }
 
+      // animal breeding: decrement love, queue a baby near an in-love same-kind partner
+      if (e.in_love_ > 0) {
+        --e.in_love_;
+        if (e.in_love_ > 1 && !pending_baby_.count(id)) {
+          for (auto& [pid, other] : entities_) {
+            if (other.kind != e.kind || pid == id || other.in_love_ <= 0 || other.is_baby_) continue;
+            float dx = other.x - e.x, dz = other.z - e.z;
+            if (dx * dx + dz * dz > 4.f) continue;
+            pending_baby_[id] = true;
+            pending_baby_[pid] = true;
+            baby_queue_.push_back({e.kind, e.level, (e.x + other.x) / 2, e.y, (e.z + other.z) / 2});
+            break;
+          }
+        }
+      }
+      if (e.is_baby_ && e.grow_ticks_ > 0 && --e.grow_ticks_ <= 0) e.is_baby_ = false;
+
       --e.wander_ticks;
       if (e.attack_cooldown_ > 0) --e.attack_cooldown_;
       if (e.hurt_flee_ticks_ > 0) --e.hurt_flee_ticks_;
@@ -691,6 +718,27 @@ public:
           } else {
             e.ai_target_eid_ = -1;
             if (e.kind == EntityKind::Creeper && e.swell_ > 0) e.swell_ = 0; // defuse
+          }
+        }
+        // tamed wolf: follow owner (unless sitting); sit stays put
+        if (e.kind == EntityKind::Wolf && e.tamed_) {
+          ai_driving = false;
+          if (!e.sitting_ && player_pos_) {
+            float ox = 0, oy = 0, oz = 0;
+            if (player_pos_(e.level, e.owner_name_, ox, oy, oz)) {
+              float ddx = ox - e.x, ddz = oz - e.z;
+              float dist = std::sqrt(ddx * ddx + ddz * ddz);
+              e.target_yaw = -std::atan2(ddx, ddz) * 180.f / 3.14159265f;
+              e.yaw = e.target_yaw;
+              if (dist > 2.5f) {
+                e.motion_x = ddx / std::max(dist, 0.01f) * e.speed * 1.5f;
+                e.motion_z = ddz / std::max(dist, 0.01f) * e.speed * 1.5f;
+                ai_driving = true;
+              } else {
+                e.motion_x = 0;
+                e.motion_z = 0;
+              }
+            }
           }
         } else if (e.hurt_flee_ticks_ > 0) {
           // animal flees from the attacker position
@@ -785,6 +833,13 @@ public:
       if (changed) moved.push_back(&e);
     }
     for (auto id : to_erase) entities_.erase(id);
+    for (const auto& b : baby_queue_) {
+      auto& baby = spawn(b.kind, b.level, b.x, b.y, b.z);
+      baby.is_baby_ = true;
+      baby.grow_ticks_ = 24000;
+    }
+    baby_queue_.clear();
+    pending_baby_.clear();
     return moved;
   }
 
@@ -797,6 +852,9 @@ public:
   void setMobAttackHandler(MobAttackFn f) { mob_attack_ = std::move(f); }
   using ProjectileHitFn = std::function<bool(const Entity& proj, float damage)>;
   void setProjectileHit(ProjectileHitFn f) { projectile_hit_ = std::move(f); }
+  // returns (x,y,z) of a named player in the entity's level (owner follow)
+  using PlayerPosFn = std::function<bool(level::Level*, const std::string& name, float&, float&, float&)>;
+  void setPlayerPos(PlayerPosFn f) { player_pos_ = std::move(f); }
 
   std::unordered_map<std::int64_t, Entity>& all() { return entities_; }
   const std::unordered_map<std::int64_t, Entity>& all() const { return entities_; }
@@ -827,6 +885,10 @@ private:
   NearestPlayerFn nearest_player_;
   MobAttackFn mob_attack_;
   ProjectileHitFn projectile_hit_;
+  PlayerPosFn player_pos_;
+  struct BabyReq { EntityKind kind; level::Level* level; float x, y, z; };
+  std::vector<BabyReq> baby_queue_;
+  std::unordered_map<std::int64_t, bool> pending_baby_;
   std::unordered_map<std::int64_t, Entity> entities_;
   std::mt19937 rng_{std::random_device{}()};
 };
