@@ -31,4 +31,15 @@ std::vector<EnchantEntry> getEnchantments(std::string_view item_nbt_le);
 std::string setEnchantment(std::string_view item_nbt_le, int id, int level); // returns new LE NBT
 int enchantLevel(std::string_view item_nbt_le, int id);
 
+// Enchanting-table offer generation (EnchantmentLevelTable::generateOffers)
+int getEnchantAbility(int item_id, int meta);
+struct EnchantOffer {
+  std::vector<EnchantEntry> enchantments;
+  int cost; // level cost shown on the button (option+1 resource cost is separate)
+};
+// 3 offers for an item + bookshelf count with a per-player seed
+std::vector<EnchantOffer> generateEnchantOffers(int item_id, int meta, int bookshelves, std::int64_t seed);
+// supported-by-item check for an enchantment on the enchanting table (primary slot)
+bool canEnchantItemTable(int item_id, const EnchantDef& def);
+
 } // namespace mpmpes::item

@@ -153,6 +153,10 @@ private:
 
   // Container windows (chest type 0 / furnace type 2 / hopper type 8)
   void openChest(player::Player& p, int x, int y, int z);
+  int countBookshelf(int x, int y, int z, level::Level* lvl);
+  void sendEnchantOffers(player::Player& p);
+  void openEnchantTable(player::Player& p, int x, int y, int z);
+  void handleEnchantTransaction(player::Player& p);
   void openFurnace(player::Player& p, int x, int y, int z);
   void openHopper(player::Player& p, int x, int y, int z);
   // Chest/hopper minecart inventory (entity-linked ContainerOpen)

@@ -148,3 +148,180 @@ int enchantLevel(std::string_view item_nbt_le, int id) {
 }
 
 } // namespace mpmpes::item
+
+// ---------------------------------------------------------------- enchant offers
+#include "mpmpes/level/gen/EndGenerator.hpp" // JavaRandom
+
+namespace mpmpes::item {
+namespace {
+int armorTier(int id) {
+  switch (id) {
+    case 298: case 299: case 300: case 301: return 1; // leather
+    case 302: case 303: case 304: case 305: return 2; // chain
+    case 306: case 307: case 308: case 309: return 3; // iron
+    case 310: case 311: case 312: case 313: return 5; // diamond
+    case 314: case 315: case 316: case 317: return 4; // gold
+  }
+  return 0;
+}
+int toolTier(int id) {
+  switch (id) {
+    case 270: case 271: case 272: case 273: case 274: return 1; // wood
+    case 275: case 276: case 277: case 278: case 279: return 2; // stone
+    case 256: case 257: case 258: case 259: case 267: return 3; // iron
+    case 254: case 255: case 250: case 251: case 252: case 253: return 5; // diamond tools
+    case 280: case 281: case 282: case 283: case 284: return 4; // gold
+  }
+  return 0;
+}
+// getEnchantAbility (PHP Enchantment::getEnchantAbility)
+int abilityFor(int id) {
+  if (id == 340 || id == 261 || id == 346) return 1; // book/bow/fishing_rod
+  int at = armorTier(id);
+  if (at) {
+    static const int vals[] = {0, 15, 12, 9, 25, 10}; // leather/gold/chain/iron/diamond
+    static const int v2[] = {0, 15, 25, 12, 9, 10};
+    return v2[at];
+  }
+  // tools: sword/axe/pickaxe/shovel/hoe by tier
+  switch (id) {
+    // wooden 15, stone 5, iron 14, diamond 10, gold 22
+    case 268: case 269: case 270: case 271: case 290: return 15; // wood sword/axe/pick/shovel/hoe
+    case 272: case 273: case 274: case 275: case 291: return 5;  // stone
+    case 256: case 257: case 258: case 259: case 267: return 14; // iron
+    case 277: case 278: case 279: case 276: case 293: return 10; // diamond
+    case 280: case 281: case 282: case 283: case 294: return 22; // gold
+  }
+  return 0;
+}
+std::uint32_t itemSlotFor(int id) {
+  // map item id to the SLOT_* bit(s) it can receive
+  if (id == 340) return S_ALL; // book accepts all (enchanted book)
+  if (id == 261) return S_BOW;
+  if (id == 346) return S_FISHING_ROD;
+  int at = armorTier(id);
+  if (at) {
+    // which armor slot: helmet 298/302/306/310/314, chest 299/303/307/311/315, legs 300/304/308/312/316, boots 301/305/309/313/317
+    switch (id) {
+      case 298: case 302: case 306: case 310: case 314: return S_HEAD;
+      case 299: case 303: case 307: case 311: case 315: return S_TORSO;
+      case 300: case 304: case 308: case 312: case 316: return S_LEGS;
+      case 301: case 305: case 309: case 313: case 317: return S_FEET;
+    }
+  }
+  switch (id) {
+    case 267: case 268: case 272: case 276: case 283: return S_SWORD;
+    case 269: case 273: case 258: case 277: case 281: return S_AXE;
+    case 270: case 274: case 257: case 278: case 282: return S_PICKAXE;
+    case 271: case 275: case 256: case 279: case 280: return S_SHOVEL;
+    case 290: case 291: case 292: case 293: case 294: return S_HOE;
+  }
+  return 0;
+}
+bool compatible(int a, int b) {
+  if (a == b) return false;
+  static const int excl[][4] = {{0, 1, 3, 4}, {9, 10, 11, -1}, {16, 18, -1, -1}};
+  for (auto& g : excl) {
+    bool ai = false, bi = false;
+    for (int i = 0; i < 4 && g[i] >= 0; ++i) {
+      if (g[i] == a) ai = true;
+      if (g[i] == b) bi = true;
+    }
+    if (ai && bi) return false;
+  }
+  return true;
+}
+int enchantCost(level::gen::JavaRandom& random, int slot, int bookshelves, int ability) {
+  bookshelves = std::max(0, std::min(15, bookshelves));
+  int selected = random.nextInt(8) + 1 + (bookshelves >> 1) + random.nextInt(bookshelves + 1);
+  if (slot == 0) return std::max(selected / 3, 1);
+  return slot == 1 ? (selected * 2) / 3 + 1 : std::max(selected, bookshelves * 2);
+}
+float f32(double v) { return static_cast<float>(v); }
+
+std::vector<EnchantEntry> selectEnchantments(int item_id, int cost, level::gen::JavaRandom& random) {
+  int ability = abilityFor(item_id);
+  if (ability <= 0 || cost <= 0) return {};
+  cost += 1 + random.nextInt(ability / 4 + 1) + random.nextInt(ability / 4 + 1);
+  float span = f32(f32(f32(random.nextFloat() + random.nextFloat()) - 1.0f) * f32(0.15f));
+  cost = std::max(1, (int)std::floor(f32(cost + f32(cost * span)) + 0.5f));
+  // possible: canEnchantItemTable + ability range covers cost
+  std::uint32_t slot = itemSlotFor(item_id);
+  std::vector<const EnchantDef*> possible;
+  for (const auto& d : DEFS) {
+    // applicable if the enchantment's primary slot overlaps the item, or it's universal (S_ALL)
+    if (!(d.primary & slot) && d.primary != S_ALL) continue;
+    // level range for this cost: choose level 1..max where [min,max] covers cost
+    bool ok = false;
+    for (int lvl = 1; lvl <= d.max_level; ++lvl) {
+      int mn = d.min_lo + (lvl - 1) * d.min_step_lo;
+      int mx = d.max_lo + (lvl - 1) * d.max_step_hi;
+      if (cost >= mn && cost <= mx) { ok = true; break; }
+    }
+    if (ok) possible.push_back(&d);
+  }
+  if (possible.empty()) return {};
+  auto choose = [&](const std::vector<const EnchantDef*>& pool) -> const EnchantDef* {
+    int total = 0;
+    for (auto* d : pool) total += d->weight;
+    int pick = random.nextInt(total);
+    for (auto* d : pool) {
+      pick -= d->weight;
+      if (pick < 0) return d;
+    }
+    return pool.back();
+  };
+  std::vector<EnchantEntry> result;
+  const EnchantDef* first = choose(possible);
+  // level for the chosen: the highest level whose min <= cost
+  auto levelFor = [&](const EnchantDef* d, int c) {
+    int lvl = 1;
+    for (int l = 1; l <= d->max_level; ++l) {
+      int mn = d->min_lo + (l - 1) * d->min_step_lo;
+      int mx = d->max_lo + (l - 1) * d->max_step_hi;
+      if (c >= mn && c <= mx) lvl = l;
+    }
+    return lvl;
+  };
+  result.push_back({first->id, levelFor(first, cost)});
+  while (random.nextInt(50) <= cost) {
+    int last = result.back().id;
+    std::vector<const EnchantDef*> filtered;
+    for (auto* d : possible)
+      if (compatible(last, d->id)) filtered.push_back(d);
+    if (filtered.empty()) break;
+    const EnchantDef* nxt = choose(filtered);
+    result.push_back({nxt->id, levelFor(nxt, cost)});
+    cost /= 2;
+  }
+  return result;
+}
+} // namespace
+
+int getEnchantAbility(int item_id, int meta) { return abilityFor(item_id); }
+bool canEnchantItemTable(int item_id, const EnchantDef& def) {
+  std::uint32_t slot = itemSlotFor(item_id);
+  return (def.primary & slot) != 0 || (def.primary & S_ALL) != 0;
+}
+
+std::vector<EnchantOffer> generateEnchantOffers(int item_id, int meta, int bookshelves,
+                                                std::int64_t seed) {
+  std::vector<EnchantOffer> out;
+  if (abilityFor(item_id) <= 0) return out;
+  level::gen::JavaRandom random(seed);
+  int costs[3];
+  for (int slot = 0; slot < 3; ++slot) {
+    int cost = enchantCost(random, slot, bookshelves, abilityFor(item_id));
+    costs[slot] = cost >= slot + 1 ? cost : 0;
+  }
+  for (int slot = 0; slot < 3; ++slot) {
+    random.setSeed(seed + slot);
+    auto list = costs[slot] > 0 ? selectEnchantments(item_id, costs[slot], random) : std::vector<EnchantEntry>{};
+    if (item_id == 340 && list.size() > 1)
+      list.erase(list.begin() + random.nextInt(static_cast<int>(list.size())));
+    out.push_back({list, list.empty() ? 0 : costs[slot]});
+  }
+  return out;
+}
+
+} // namespace mpmpes::item

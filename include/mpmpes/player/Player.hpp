@@ -107,7 +107,12 @@ struct Player {
   int hurt_cooldown_ = 0;   // i-frames after damage
   int death_ticks_ = -1;
   int bow_draw_start_ = -1; // tick when bow draw began (for release force)
-  int crafting_type = 0; // 0 = 2x2 inventory grid, 1 = 3x3 workbench (PHP craftingType)    // >=0 while dead awaiting respawn
+  int crafting_type = 0; // 0 = 2x2 inventory grid, 1 = 3x3 workbench (PHP craftingType)
+  // enchanting table (EnchantInventory)
+  std::int64_t enchant_seed_ = 0;
+  int enchant_bookshelves_ = 0;
+  int enchant_table_x_ = 0, enchant_table_y_ = -1, enchant_table_z_ = 0;
+  item::ItemStack open_enchant_item_;    // >=0 while dead awaiting respawn
 
   // Client sky/atmosphere dim override (any wire value). -1 = follow level.
   // Used by visual-dim experiments without world switch; not remapped/whitelist-filtered.

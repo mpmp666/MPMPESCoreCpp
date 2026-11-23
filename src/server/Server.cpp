@@ -3817,6 +3817,58 @@ void Server::broadcastChestLid(level::Level* level, int x, int y, int z, bool op
                           static_cast<float>(z) + 0.5f, 64.f, pk, level, nullptr);
 }
 
+int Server::countBookshelf(int x, int y, int z, level::Level* lvl) {
+  int count = 0;
+  for (int dx = -2; dx <= 2; ++dx)
+    for (int dz = -2; dz <= 2; ++dz) {
+      if (std::abs(dx) != 2 && std::abs(dz) != 2) continue;
+      for (int dy = 0; dy <= 1; ++dy) {
+        if (lvl->getBlockId(x + dx, y + dy, z + dz) == protocol::BLOCK_BOOKSHELF &&
+            lvl->getBlockId(x + dx / 2, y + dy, z + dz / 2) == 0) {
+          if (++count >= 15) return 15;
+        }
+      }
+    }
+  return count;
+}
+
+void Server::sendEnchantOffers(player::Player& p) {
+  if (!p.level || p.enchant_table_y_ < 0) return;
+  auto held = p.open_enchant_item_;
+  if (held.empty()) return;
+  auto offers = item::generateEnchantOffers(held.id, held.damage, p.enchant_bookshelves_, p.enchant_seed_);
+  std::vector<std::tuple<int, std::vector<std::pair<int, int>>, std::string>> wire;
+  static const char* names[] = {"bless", "curse", "charm"};
+  int i = 0;
+  for (const auto& o : offers) {
+    std::vector<std::pair<int, int>> ench;
+    for (const auto& e : o.enchantments) ench.push_back({e.id, e.level});
+    wire.push_back({o.cost, ench, names[i % 3]});
+    ++i;
+  }
+  players_->sendPacket(p, protocol::encodeEnchantmentList(wire), true);
+}
+
+void Server::openEnchantTable(player::Player& p, int x, int y, int z) {
+  if (!p.level) return;
+  if (p.open_window_id != 0) closeContainer(p, true);
+  if (p.enchant_seed_ == 0) p.enchant_seed_ = std::mt19937{std::random_device{}()}() & 0x7fffffff;
+  p.enchant_bookshelves_ = countBookshelf(x, y, z, p.level);
+  p.enchant_table_x_ = x;
+  p.enchant_table_y_ = y;
+  p.enchant_table_z_ = z;
+  const std::uint8_t wid = nextDynamicWindowId();
+  p.open_window_id = wid;
+  p.open_container_type = protocol::CONTAINER_TYPE_ENCHANT;
+  p.open_chest_x = x;
+  p.open_chest_y = y;
+  p.open_chest_z = z;
+  players_->sendPacket(
+      p, protocol::encodeContainerOpen(wid, protocol::CONTAINER_TYPE_ENCHANT, 2, x, y, z, -1), true);
+  // offer item starts empty; offers refresh when the player inserts one (set slot)
+  p.open_enchant_item_ = item::ItemStack::air();
+}
+
 void Server::openChest(player::Player& p, int x, int y, int z) {
   if (!p.level || !p.spawned) return;
   if (p.level->getBlockId(x, y, z) != protocol::BLOCK_CHEST) return;
@@ -4112,6 +4164,10 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
   // Right-click container / redstone activate (PM onActivate)
   if (p.level) {
     const auto bid = p.level->getBlockId(u.x, u.y, u.z);
+    if (bid == protocol::BLOCK_ENCHANTING_TABLE) {
+      openEnchantTable(p, u.x, u.y, u.z);
+      return;
+    }
     if (bid == protocol::BLOCK_WORKBENCH) {
       // PHP Workbench::onActivate: just switches the player's grid to 3x3
       p.crafting_type = 1;
@@ -4349,6 +4405,79 @@ void Server::handleContainerSetSlot(player::Player& p, std::string_view buffer) 
 
   // Creative window 0x79 is server→client only content list; ignore client writes
   if (d.window_id == protocol::WINDOW_CREATIVE) {
+    return;
+  }
+
+  // Enchant table window: track the offer item + validate enchanted results
+  if (p.open_window_id != 0 && d.window_id == p.open_window_id &&
+      p.open_container_type == protocol::CONTAINER_TYPE_ENCHANT) {
+    if (d.slot == 0) {
+      // inserting / replacing the offer item -> refresh offers; a result with ench NBT = an enchant
+      auto clean = item::sanitizeSlot(d.item);
+      bool wasPlain = p.open_enchant_item_.empty() || item::getEnchantments(p.open_enchant_item_.nbt).empty();
+      auto resultEnch = item::getEnchantments(clean.nbt);
+      if (!resultEnch.empty() && p.gamemode != 1) {
+        // the client submitted an enchanted result: validate against current offers
+        auto offers = item::generateEnchantOffers(p.open_enchant_item_.id, p.open_enchant_item_.damage,
+                                                  p.enchant_bookshelves_, p.enchant_seed_);
+        int matched = -1;
+        for (std::size_t oi = 0; oi < offers.size(); ++oi) {
+          const auto& o = offers[oi];
+          if (o.enchantments.size() != resultEnch.size()) continue;
+          bool same = true;
+          for (const auto& e : o.enchantments) {
+            bool found = false;
+            for (const auto& re : resultEnch)
+              if (re.id == e.id && re.level == e.level) { found = true; break; }
+            if (!found) { same = false; break; }
+          }
+          if (same) { matched = static_cast<int>(oi); break; }
+        }
+        if (matched < 0) {
+          // invalid enchant: resync (reject)
+          players_->sendInventory(p);
+          sendEnchantOffers(p);
+          return;
+        }
+        int cost = matched + 1; // lapis + level cost
+        const auto& offer = offers[matched];
+        if (p.xp_level < offer.cost || p.xp_level < cost) {
+          players_->sendInventory(p);
+          sendEnchantOffers(p);
+          return;
+        }
+        // consume lapis (slot 1) + levels
+        int lapis = 0;
+        for (auto& s : p.inventory)
+          if (s.id == 351 && s.damage == 4) lapis += s.count;
+        if (lapis < cost) {
+          players_->sendInventory(p);
+          sendEnchantOffers(p);
+          return;
+        }
+        int need = cost;
+        for (auto& s : p.inventory) {
+          if (s.id == 351 && s.damage == 4 && need > 0) {
+            int take = std::min(need, static_cast<int>(s.count));
+            s.count = static_cast<std::uint8_t>(s.count - take);
+            need -= take;
+            if (s.count == 0) s = item::ItemStack::air();
+          }
+        }
+        p.xp_level -= cost;
+        // apply the enchanted item into slot 0 (client already shows it; accept + rotate seed)
+        p.open_enchant_item_ = clean;
+        p.enchant_seed_ = (p.enchant_seed_ * 48271 + 11) & 0x7fffffff;
+        players_->sendInventory(p);
+        sendEnchantOffers(p);
+        return;
+      }
+      // plain item insert: track + refresh offers
+      p.open_enchant_item_ = clean;
+      sendEnchantOffers(p);
+      return;
+    }
+    // slot 1 = lapis; accept
     return;
   }
 

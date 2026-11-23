@@ -897,6 +897,31 @@ inline ContainerSetSlotDecoded decodeContainerSetSlot(std::string_view buffer) {
 // CraftingData (0xba).
 // PE 0.14 Windows client is very brittle about recipe blobs when opening inventory (E):
 // a non-empty / slightly-wrong shaped grid has historically crashed Win32 0.14.x.
+// EnchantmentList (CraftingDataPacket ENTRY_ENCHANT_LIST = 4): [byte count][int cost][byte n]
+// [int id][int lvl]...[str name]... then clean=1
+inline std::string encodeEnchantmentList(
+    const std::vector<std::tuple<int, std::vector<std::pair<int, int>>, std::string>>& offers) {
+  binary::BinaryStream out;
+  out.putByte(CRAFTING_DATA_PACKET);
+  out.putInt(1);                    // one entry
+  out.putInt(4);   // ENTRY_ENCHANT_LIST
+  binary::BinaryStream w;
+  w.putByte(static_cast<std::uint8_t>(offers.size()));
+  for (const auto& [cost, enchants, name] : offers) {
+    w.putInt(cost);
+    w.putByte(static_cast<std::uint8_t>(enchants.size()));
+    for (const auto& [id, lvl] : enchants) {
+      w.putInt(id);
+      w.putInt(lvl);
+    }
+    w.putString(name);
+  }
+  out.putInt(static_cast<std::int32_t>(w.buffer().size()));
+  out.put(w.buffer());
+  out.putByte(0); // clean = 0 (don't wipe recipes)
+  return out.buffer();
+}
+
 // Default path: empty recipe list + clean=1 (keep client alive). CraftingEvent is still
 // accepted server-side for client-driven crafts; fill recipes later only after Win smoke.
 // Set include_stub_recipes=true to emit a tiny shaped set (Android-only experiments).
