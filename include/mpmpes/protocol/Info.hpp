@@ -55,6 +55,7 @@ inline constexpr std::uint8_t CONTAINER_CLOSE_PACKET = 0xb6;
 inline constexpr std::uint8_t CONTAINER_SET_SLOT_PACKET = 0xb7;
 inline constexpr std::uint8_t CONTAINER_SET_DATA_PACKET = 0xb8;
 inline constexpr std::uint8_t CONTAINER_SET_CONTENT_PACKET = 0xb9;
+inline constexpr std::uint8_t CLIENTBOUND_MAP_ITEM_DATA_PACKET = 0xc6;
 inline constexpr std::uint8_t CRAFTING_DATA_PACKET = 0xba;
 inline constexpr std::uint8_t CRAFTING_EVENT_PACKET = 0xbb;
 inline constexpr std::uint8_t ADVENTURE_SETTINGS_PACKET = 0xbc;

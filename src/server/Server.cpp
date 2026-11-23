@@ -11,6 +11,7 @@
 #include "mpmpes/entity/EntityNbt.hpp"
 #include "mpmpes/entity/Effects.hpp"
 #include "mpmpes/item/Anvil.hpp"
+#include "mpmpes/nbt/Tag.hpp"
 #include "mpmpes/item/Enchantments.hpp"
 #include "mpmpes/level/structure/Repository.hpp"
 #include "mpmpes/level/structure/StructurePlacer.hpp"
@@ -3032,6 +3033,45 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     return out;
   };
   const std::string RED = std::string("\xc2\xa7") + "c";
+
+  if (cmd == "map") {
+    // /map create | /map image <path.png> (PHP MPApi dynamic maps)
+    auto v = splitArgs(args);
+    if (v.empty()) { reply("Usage: /map <create|image <file.png>>"); return; }
+    if (!player) { reply("Requires an in-game player"); return; }
+    if (v[0] == "create") {
+      auto id = maps_.createMap();
+      // give a filled_map item with the id in NBT (mapId int)
+      auto map = item::ItemStack::of(358, 1, 0); // FILLED_MAP
+      auto tag = nbt::Tag::Compound();
+      tag->set("mapId", nbt::Tag::Long(id));
+      tag->set("map_uuid", nbt::Tag::Long(id));
+      map.nbt = nbt::write(*tag, "", nbt::Endian::Little);
+      for (auto& s : player->inventory)
+        if (s.empty()) { s = map; break; }
+      players_->sendInventory(*player);
+      reply("Created map #" + std::to_string(id));
+      return;
+    }
+    if (v[0] == "image" && v.size() >= 2) {
+      // load into the held map (or the newest map)
+      auto held = player->heldItem();
+      std::int64_t id = -1;
+      if (held.id == 358) {
+        auto t = held.nbt.empty() ? nullptr : nbt::read(held.nbt, nbt::Endian::Little);
+        if (t) id = t->getInt("mapId", -1);
+      }
+      if (id < 0) id = maps_.createMap();
+      if (!maps_.loadImage(id, v[1])) { reply("Failed to load image: " + v[1]); return; }
+      // send the map data to the player (they see it on the map)
+      const auto* colors = maps_.colors(id);
+      players_->sendPacket(*player, protocol::encodeMapItemData(id, 0, *colors, 128, 128), true);
+      reply("Loaded " + v[1] + " into map #" + std::to_string(id));
+      return;
+    }
+    reply("Usage: /map <create|image <file.png>>");
+    return;
+  }
 
   if (cmd == "locate") {
     auto argv = splitArgs(args);

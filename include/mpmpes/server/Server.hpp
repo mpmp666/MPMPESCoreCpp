@@ -6,6 +6,7 @@
 #include "mpmpes/player/Player.hpp"
 #include "mpmpes/network/QueryRcon.hpp"
 #include "mpmpes/plugin/PluginManager.hpp"
+#include "mpmpes/server/MapManager.hpp"
 #include "mpmpes/raklib/SessionManager.hpp"
 #include "mpmpes/raklib/UDPServerSocket.hpp"
 #include "mpmpes/server/Permission.hpp"
@@ -216,6 +217,7 @@ private:
   std::vector<ScheduledTask> scheduled_tasks_;
   std::int64_t next_task_id_ = 1;
   void processScheduledTasks();
+  MapManager maps_;
   network::QueryHandler query_handler_;
   network::RconServer rcon_;
   std::thread console_thread_;

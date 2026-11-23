@@ -315,6 +315,28 @@ inline std::string encodeEmptyMetadata() {
   return m;
 }
 
+// ClientboundMapItemDataPacket: map texture (128x128 RGBA)
+inline std::string encodeMapItemData(std::int64_t map_id, std::uint8_t scale,
+                                     const std::vector<std::uint8_t>& rgba, int width, int height,
+                                     int x_offset = 0, int y_offset = 0) {
+  binary::BinaryStream out;
+  out.putByte(CLIENTBOUND_MAP_ITEM_DATA_PACKET);
+  out.putLong(map_id);
+  out.putInt(0x04); // BITFLAG_TEXTURE_UPDATE
+  out.putByte(scale);
+  out.putInt(width);
+  out.putInt(height);
+  out.putInt(x_offset);
+  out.putInt(y_offset);
+  for (int i = 0; i < width * height * 4 && i + 3 < static_cast<int>(rgba.size()); i += 4) {
+    out.putByte(rgba[i]);
+    out.putByte(rgba[i + 1]);
+    out.putByte(rgba[i + 2]);
+    out.putByte(rgba[i + 3]);
+  }
+  return out.buffer();
+}
+
 // FallingSand metadata: DATA_BLOCK_INFO (key 20, INT) = blockId | (meta << 8)
 inline std::string encodeFallingBlockMetadata(std::uint8_t block_id, std::uint8_t meta) {
   std::string m;

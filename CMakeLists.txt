@@ -52,6 +52,7 @@ add_executable(mpmpes
   src/level/FluidTick.cpp
   src/player/Player.cpp
   src/server/Server.cpp
+  src/server/MapManager.cpp
   src/util/Logger.cpp
 )
 
