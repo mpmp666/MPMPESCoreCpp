@@ -38,6 +38,8 @@ private:
   void desertWell();
   void jungleTemple();
   void swampHut();
+  void buriedTreasure();
+  void bonusDungeon();
 };
 
 // meta rotation for stairs/etc (StructureRepository::rotateMeta)

@@ -183,15 +183,17 @@ Template LegacyBuilder::finish() {
 }
 
 void LegacyBuilder::desertWell() {
-  begin(5, 6, 5, 4);
-  fill(0, 0, 0, 4, 4, 4, 24, 1); // sandstone base
-  fill(1, 1, 1, 3, 2, 3, 9);     // water
-  // rim
-  for (int x = 0; x < 5; ++x)
-    for (int z = 0; z < 5; ++z) {
-      if (x == 0 || x == 4 || z == 0 || z == 4) put(x, 3, z, 24, 0);
-    }
-  put(2, 4, 2, 24, 1);
+  begin(5, 6, 5, 0);
+  fill(0, 0, 0, 4, 1, 4, 24);
+  fill(0, 2, 0, 4, 2, 4, 24);
+  fill(1, 2, 1, 3, 2, 3, 0);
+  put(2, 1, 2, 9);
+  for (auto& p : {std::pair{1, 2}, {3, 2}, {2, 1}, {2, 3}}) put(p.first, 1, p.second, 9);
+  for (auto& p : {std::pair{0, 2}, {4, 2}, {2, 0}, {2, 4}}) put(p.first, 2, p.second, 44, 1);
+  for (int x : {1, 3})
+    for (int z : {1, 3}) fill(x, 2, z, x, 4, z, 24);
+  fill(1, 5, 1, 3, 5, 3, 44, 1);
+  put(2, 5, 2, 24);
 }
 
 void LegacyBuilder::desertPyramid() {
@@ -337,6 +339,31 @@ void LegacyBuilder::jungleTemple() {
   weather(4);
 }
 
+void LegacyBuilder::buriedTreasure() {
+  begin(5, 5, 5, 0);
+  fill(0, 0, 0, 4, 0, 4, 24);
+  fill(0, 1, 0, 4, 4, 4, 12);
+  put(1, 1, 1, 24);
+  put(3, 1, 3, 24);
+  chest(2, 1, 2, 2, "treasure");
+}
+
+void LegacyBuilder::bonusDungeon() {
+  bool wide = next(2) == 0;
+  int width = wide ? 11 : 9;
+  begin(width, 7, 11, 0);
+  box(0, 0, 0, width - 1, 6, 10, 4);
+  fill(1, 1, 1, width - 2, 1, 9, 4);
+  fill(1, 2, 1, width - 2, 5, 9, 0);
+  fill(3, 2, 0, 4, 4, 0, 0);
+  fill(width - 5, 2, 10, width - 4, 4, 10, 0);
+  weather(4);
+  static const int spawnerIds[] = {32, 32, 34, 35};
+  spawner(width / 2, 2, 5, spawnerIds[next(4)]);
+  chest(1, 2, 2, 5, "dungeon");
+  chest(width - 2, 2, 8, 4, "dungeon");
+}
+
 void LegacyBuilder::swampHut() {
   begin(7, 9, 9, 5);
   fill(1, 4, 1, 5, 4, 7, 5, 1);
@@ -376,6 +403,8 @@ Template LegacyBuilder::build(const std::string& family) {
   else if (family == "desert_well") desertWell();
   else if (family == "jungle_temple") jungleTemple();
   else if (family == "swamp_hut") swampHut();
+  else if (family == "buried_treasure") buriedTreasure();
+  else if (family == "bonus_dungeon") bonusDungeon();
   return finish();
 }
 

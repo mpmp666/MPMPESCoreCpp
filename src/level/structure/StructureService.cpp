@@ -54,6 +54,16 @@ int shaNum(const std::string& s) {
   return static_cast<int>(std::stoul(std::string(hex, 7), nullptr, 16) & 0x7fffffff);
 }
 
+int boundsTop(const std::vector<Piece>& pieces) {
+  int top = 0;
+  for (const auto& pp : pieces) {
+    int sz[3];
+    StructureRepository::sizeOf(pp.templ, sz);
+    top = std::max(top, pp.y + sz[1] - 1);
+  }
+  return top;
+}
+
 struct Plan {
   bool valid = false;
   int x = 0, y = 0, z = 0;
@@ -94,6 +104,7 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
     else if (family == "bastion") pool = "bastion/starts";
     static const std::unordered_map<std::string, bool> legacy = {
         {"desert_pyramid", true}, {"desert_well", true}, {"jungle_temple", true}, {"swamp_hut", true},
+        {"buried_treasure", true}, {"bonus_dungeon", true},
     };
     if (legacy.count(family)) {
       // procedural legacy structure: build a single template piece (rotation from hash)
@@ -118,6 +129,12 @@ const Plan& planFor(std::int64_t seed, const std::string& family, const Def& def
         plan.y = floor + 1;
       } else if (def.mode == "ocean")
         plan.y = std::max(4, height + 1) - StructureRepository::groundLevel(plan.pieces[0].templ);
+      else if (def.mode == "buried") {
+        int boundsTop = 0;
+        for (const auto& pp : plan.pieces) { int sz[3]; StructureRepository::sizeOf(pp.templ, sz); boundsTop = std::max(boundsTop, sz[1]); }
+        plan.y = height - std::min(12, boundsTop / 2);
+      } else if (def.mode == "underground")
+        plan.y = std::max(8, std::min(35, height - boundsTop(plan.pieces) - 12));
       else
         plan.y = height + 1 - StructureRepository::groundLevel(plan.pieces[0].templ);
     }
