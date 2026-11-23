@@ -40,6 +40,8 @@ private:
   void swampHut();
   void buriedTreasure();
   void bonusDungeon();
+  void stronghold();
+  void door(int x, int y, int z, int facing, bool iron = false);
 };
 
 // meta rotation for stairs/etc (StructureRepository::rotateMeta)

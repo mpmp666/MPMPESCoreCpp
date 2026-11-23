@@ -1,6 +1,7 @@
 #include "mpmpes/level/structure/LegacyBuilder.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace mpmpes::level::structure {
@@ -49,6 +50,22 @@ void LegacyBuilder::weather(int id) {
 
 void LegacyBuilder::chest(int x, int y, int z, int facing, const std::string& kind) {
   put(x, y, z, 54, facing);
+  // PHP loot() exact LCG consumption: 3+next(3), then per slot next(count(table)) + next(range)
+  static const std::unordered_map<std::string, std::vector<std::array<int, 3>>> tables = {
+      {"temple", {{265, 1, 5}, {266, 1, 4}, {264, 1, 2}, {352, 3, 8}, {287, 2, 6}, {367, 3, 8}, {388, 1, 3}, {322, 1, 1}}},
+      {"library", {{340, 2, 6}, {339, 3, 8}, {345, 1, 1}, {331, 2, 6}, {266, 1, 3}}},
+      {"mine", {{265, 2, 6}, {263, 3, 8}, {66, 4, 12}, {297, 1, 4}, {264, 1, 2}, {362, 2, 5}, {361, 2, 5}}},
+      {"fortress", {{266, 1, 5}, {265, 1, 4}, {264, 1, 2}, {259, 1, 1}, {377, 2, 5}, {372, 2, 7}, {329, 1, 1}}},
+      {"treasure", {{264, 1, 3}, {266, 3, 8}, {265, 3, 9}, {388, 2, 5}, {267, 1, 1}, {297, 2, 5}}},
+      {"dungeon", {{329, 1, 1}, {265, 1, 4}, {297, 1, 4}, {331, 2, 6}, {289, 2, 6}, {287, 2, 6}, {322, 1, 1}}},
+  };
+  auto it = tables.find(kind);
+  const auto& table = it != tables.end() ? it->second : tables.at("temple");
+  int count = 3 + next(3);
+  for (int slot = 0; slot < count; ++slot) {
+    const auto& entry = table[next(static_cast<int>(table.size()))];
+    (void)next(entry[2] - entry[1] + 1);
+  }
   Template::Tile tile;
   tile.pos[0] = x;
   tile.pos[1] = y;
@@ -69,6 +86,7 @@ void LegacyBuilder::dispenser(int x, int y, int z, int facing) {
 
 void LegacyBuilder::spawner(int x, int y, int z, int entityId) {
   put(x, y, z, 52);
+  (void)next(200); // PHP spawner Delay = 100 + next(200)
   Template::Tile tile;
   tile.pos[0] = x;
   tile.pos[1] = y;
@@ -364,6 +382,102 @@ void LegacyBuilder::bonusDungeon() {
   chest(width - 2, 2, 8, 4, "dungeon");
 }
 
+void LegacyBuilder::door(int x, int y, int z, int facing, bool iron) {
+  // PHP door(): bottom at y (facing), top at y+1 (meta 8)
+  int id = iron ? 71 : 64;
+  put(x, y, z, id, facing);
+  put(x, y + 1, z, id, 8);
+}
+
+void LegacyBuilder::stronghold() {
+  begin(53, 15, 51, 0);
+  box(22, 1, 0, 30, 8, 10, 98);
+  box(24, 1, 9, 28, 6, 35, 98);
+  box(19, 1, 14, 33, 7, 22, 98);
+  box(12, 1, 16, 40, 6, 20, 98);
+  fill(25, 2, 0, 27, 4, 35, 0);
+  fill(12, 2, 17, 40, 4, 19, 0);
+  fill(20, 2, 15, 32, 6, 21, 0);
+  for (int x : {20, 32}) {
+    fill(x, 2, 15, x, 6, 15, 98, 3);
+    fill(x, 2, 21, x, 6, 21, 98, 3);
+  }
+  fill(24, 6, 15, 28, 6, 21, 44, 5);
+  fill(20, 6, 17, 32, 6, 19, 44, 5);
+  for (int z : {7, 12, 24, 30}) {
+    put(25, 4, z, 50, 1);
+    put(27, 4, z, 50, 2);
+  }
+  door(26, 2, 1, 1);
+  box(0, 1, 12, 13, 12, 28, 98);
+  fill(12, 2, 17, 13, 4, 19, 0);
+  for (int z = 13; z <= 27; ++z) {
+    bool pier = ((z - 13) % 4) == 0;
+    for (int x : {1, 12}) {
+      fill(x, 2, z, x, 5, z, pier ? 5 : 47);
+      fill(x, 8, z, x, 10, z, pier ? 5 : 47);
+    }
+    if (pier) {
+      put(2, 4, z, 50, 1);
+      put(11, 4, z, 50, 2);
+    }
+  }
+  fill(12, 2, 17, 13, 4, 19, 0);
+  for (int x : {4, 8})
+    for (int z : {15, 21}) fill(x, 2, z, x + 1, 4, z + 3, 47);
+  fill(1, 7, 13, 3, 7, 27, 5);
+  fill(10, 7, 13, 12, 7, 27, 5);
+  fill(4, 7, 13, 9, 7, 15, 5);
+  fill(4, 7, 25, 9, 7, 27, 5);
+  fill(3, 8, 16, 3, 8, 24, 85);
+  fill(10, 8, 16, 10, 8, 24, 85);
+  fill(4, 8, 15, 9, 8, 15, 85);
+  fill(4, 8, 25, 9, 8, 25, 85);
+  fill(2, 2, 26, 2, 7, 26, 65, 5);
+  put(2, 7, 26, 0);
+  fill(6, 9, 19, 7, 9, 20, 85);
+  put(6, 8, 19, 50, 5);
+  put(7, 8, 20, 50, 5);
+  chest(9, 2, 26, 2, "library");
+  chest(11, 8, 14, 3, "library");
+  for (auto& p : {std::array<int,3>{2, 11, 15}, std::array<int,3>{10, 11, 24}, std::array<int,3>{5, 6, 17}, std::array<int,3>{8, 5, 24}}) {
+    if (next(3) != 0) put(p[0], p[1], p[2], 30);
+  }
+  box(39, 1, 12, 52, 7, 26, 98);
+  fill(39, 2, 17, 40, 4, 19, 0);
+  for (int z : {14, 18, 22}) {
+    fill(46, 2, z, 46, 5, z + 2, 101);
+    fill(47, 1, z + 3, 51, 6, z + 3, 98);
+    door(46, 2, z + 1, 0, true);
+    put(45, 2, z + 1, 70);
+  }
+  chest(41, 2, 24, 2);
+  box(20, 1, 34, 32, 10, 50, 98);
+  fill(25, 2, 34, 27, 4, 35, 0);
+  for (int x : {22, 30}) {
+    fill(x, 2, 38, x, 4, 44, 101);
+    fill(x, 1, 37, x, 1, 47, 11);
+  }
+  fill(24, 1, 41, 28, 1, 45, 11);
+  fill(24, 2, 41, 28, 3, 45, 98);
+  fill(25, 3, 42, 27, 3, 44, 49);
+  for (int d = 0; d < 3; ++d) {
+    put(25 + d, 4, 41, 120, 0);
+    put(25 + d, 4, 45, 120, 2);
+    put(24, 4, 42 + d, 120, 3);
+    put(28, 4, 42 + d, 120, 1);
+  }
+  fill(25, 2, 38, 27, 2, 38, 109, 2);
+  fill(25, 2, 39, 27, 2, 40, 98);
+  fill(25, 3, 39, 27, 3, 39, 109, 2);
+  spawner(26, 2, 37, 39);
+  for (int z : {37, 41, 45, 48}) {
+    put(21, 6, z, 101);
+    put(31, 6, z, 101);
+  }
+  weather(98);
+}
+
 void LegacyBuilder::swampHut() {
   begin(7, 9, 9, 5);
   fill(1, 4, 1, 5, 4, 7, 5, 1);
@@ -405,6 +519,7 @@ Template LegacyBuilder::build(const std::string& family) {
   else if (family == "swamp_hut") swampHut();
   else if (family == "buried_treasure") buriedTreasure();
   else if (family == "bonus_dungeon") bonusDungeon();
+  else if (family == "stronghold") stronghold();
   return finish();
 }
 
