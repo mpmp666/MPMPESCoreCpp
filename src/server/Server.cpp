@@ -4111,6 +4111,11 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
   // Right-click container / redstone activate (PM onActivate)
   if (p.level) {
     const auto bid = p.level->getBlockId(u.x, u.y, u.z);
+    if (bid == protocol::BLOCK_WORKBENCH) {
+      // PHP Workbench::onActivate: just switches the player's grid to 3x3
+      p.crafting_type = 1;
+      return;
+    }
     if (bid == protocol::BLOCK_CHEST) {
       openChest(p, u.x, u.y, u.z);
       return;
@@ -4499,6 +4504,15 @@ void Server::handleCraftingEvent(player::Player& p, std::string_view buffer) {
   // PHP Player CRAFTING_EVENT: look up by recipe UUID, validate inputs, consume.
   auto& reg = item::RecipeRegistry::instance();
   const item::RecipeEntry* recipe = reg.findByUuid(c.uuid);
+  // PHP: BigShapedRecipe/BigShapelessRecipe require craftingType=1 (workbench open)
+  if (recipe && p.crafting_type == 0 && p.gamemode != 1) {
+    bool big = recipe->type == 1 ? (recipe->w > 2 || recipe->h > 2)
+                                 : (static_cast<int>(recipe->ings.size()) > 4);
+    if (big) {
+      players_->sendInventory(p);
+      return;
+    }
+  }
   item::ItemStack result;
   if (recipe && p.gamemode != 1) {
     auto crafted = reg.tryCraft(*recipe, c.input, p.inventory);
