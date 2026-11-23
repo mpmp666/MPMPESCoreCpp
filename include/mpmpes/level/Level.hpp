@@ -223,6 +223,18 @@ public:
 
   // Hopper inventories: 5 slots (PE 0.14 HopperBlockEntity)
   // meta: low 3 bits = facing (0 down, 2 N, 3 S, 4 W, 5 E); bit 0x8 = disabled by redstone
+  // Brewing stand tile (PHP BrewingStand tile): fuel + ingredient + 3 potion slots + brew timer
+  struct BrewingInv {
+    int x, y, z;
+    std::vector<item::ItemStack> slots; // 0=fuel, 1=ingredient, 2-4 = 3 potion slots
+    int brew_ticks = 0;                 // counts down from 400
+    int fuel_left = 0;                  // brews remaining from blaze powder
+    bool dirty = false;
+  };
+  BrewingInv& getOrCreateBrewing(int x, int y, int z);
+  BrewingInv* getBrewing(int x, int y, int z);
+  void tickBrewing();
+
   struct HopperInv {
     int x = 0, y = 0, z = 0;
     std::vector<item::ItemStack> slots; // 5
@@ -277,6 +289,7 @@ private:
   std::unordered_map<std::int64_t, ChestInv> chests_;
   std::unordered_map<std::int64_t, FurnaceInv> furnaces_;
   std::unordered_map<std::int64_t, HopperInv> hoppers_;
+  std::unordered_map<std::int64_t, BrewingInv> brewings_;
   std::unordered_map<std::int64_t, SignTile> signs_;
 
   void loadTileNbt(const nbt::TagPtr& t, std::int64_t chunk_key);

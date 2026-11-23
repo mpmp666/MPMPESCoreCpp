@@ -1,4 +1,5 @@
 #include "mpmpes/level/Level.hpp"
+#include "mpmpes/item/Brewing.hpp"
 
 #include "mpmpes/protocol/Info.hpp"
 #include "mpmpes/protocol/Packets.hpp"
@@ -151,6 +152,79 @@ Chunk& Level::getOrCreateChunk(int cx, int cz) {
     }
   }
   return ins->second;
+}
+
+Level::BrewingInv& Level::getOrCreateBrewing(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  const auto key = blockPosKey(x, y, z);
+  auto it = brewings_.find(key);
+  if (it != brewings_.end()) return it->second;
+  BrewingInv inv;
+  inv.x = x;
+  inv.y = y;
+  inv.z = z;
+  inv.slots.assign(5, item::ItemStack::air());
+  auto [ins, _] = brewings_.emplace(key, std::move(inv));
+  return ins->second;
+}
+
+Level::BrewingInv* Level::getBrewing(int x, int y, int z) {
+  std::lock_guard lock(mu_);
+  auto it = brewings_.find(blockPosKey(x, y, z));
+  if (it == brewings_.end()) return nullptr;
+  return &it->second;
+}
+
+void Level::tickBrewing() {
+  std::lock_guard lock(mu_);
+  for (auto& [_, inv] : brewings_) {
+    if (inv.slots.size() < 5) continue;
+    // can brew? ingredient + at least one potion matching a recipe
+    bool canBrew = false;
+    if (!inv.slots[1].empty()) {
+      for (int i = 2; i < 5; ++i) {
+        if (inv.slots[i].id == 373 && !inv.slots[i].empty() &&
+            item::brewResult(inv.slots[i].damage, inv.slots[1].id) >= 0) {
+          canBrew = true;
+          break;
+        }
+      }
+    }
+    if (canBrew) {
+      if (inv.fuel_left <= 0) {
+        if (inv.slots[0].id == 377) { // blaze powder
+          if (--inv.slots[0].count == 0) inv.slots[0] = item::ItemStack::air();
+          inv.fuel_left = 20;
+          inv.dirty = true;
+        } else {
+          inv.brew_ticks = 0;
+          continue;
+        }
+      }
+      if (inv.brew_ticks <= 0) inv.brew_ticks = 400;
+      if (--inv.brew_ticks <= 0) {
+        // brew complete: apply to each potion slot
+        --inv.fuel_left;
+        for (int i = 2; i < 5; ++i) {
+          if (inv.slots[i].id == 373 && !inv.slots[i].empty()) {
+            int out = item::brewResult(inv.slots[i].damage, inv.slots[1].id);
+            if (out >= 0) {
+              inv.slots[i].damage = static_cast<std::int16_t>(out);
+              inv.dirty = true;
+            }
+          }
+        }
+        // consume ingredient
+        if (--inv.slots[1].count == 0) inv.slots[1] = item::ItemStack::air();
+        inv.dirty = true;
+        inv.brew_ticks = 0;
+      } else {
+        inv.dirty = true;
+      }
+    } else {
+      inv.brew_ticks = 0;
+    }
+  }
 }
 
 Level::ChestInv& Level::getOrCreateChest(int x, int y, int z) {

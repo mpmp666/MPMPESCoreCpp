@@ -32,6 +32,7 @@ add_executable(mpmpes
   src/entity/Effects.cpp
   src/item/Enchantments.cpp
   src/item/Anvil.cpp
+  src/item/Brewing.cpp
   src/network/QueryRcon.cpp
   src/level/gen/NormalGenerator.cpp
   src/level/gen/NormalChunk.cpp

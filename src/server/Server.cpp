@@ -3881,6 +3881,21 @@ void Server::sendEnchantOffers(player::Player& p) {
   players_->sendPacket(p, protocol::encodeEnchantmentList(wire), true);
 }
 
+void Server::openBrewingStand(player::Player& p, int x, int y, int z) {
+  if (!p.level) return;
+  if (p.open_window_id != 0) closeContainer(p, true);
+  auto& inv = p.level->getOrCreateBrewing(x, y, z);
+  const std::uint8_t wid = nextDynamicWindowId();
+  p.open_window_id = wid;
+  p.open_container_type = protocol::CONTAINER_TYPE_BREWING_STAND;
+  p.open_chest_x = x;
+  p.open_chest_y = y;
+  p.open_chest_z = z;
+  players_->sendPacket(
+      p, protocol::encodeContainerOpen(wid, protocol::CONTAINER_TYPE_BREWING_STAND, 5, x, y, z, -1), true);
+  players_->sendPacket(p, protocol::encodeContainerSetContent(wid, inv.slots), true);
+}
+
 void Server::openAnvil(player::Player& p, int x, int y, int z) {
   if (!p.level) return;
   if (p.open_window_id != 0) closeContainer(p, true);
@@ -4214,6 +4229,10 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
   // Right-click container / redstone activate (PM onActivate)
   if (p.level) {
     const auto bid = p.level->getBlockId(u.x, u.y, u.z);
+    if (bid == protocol::BLOCK_BREWING_STAND) {
+      openBrewingStand(p, u.x, u.y, u.z);
+      return;
+    }
     if (bid == protocol::BLOCK_ANVIL) {
       openAnvil(p, u.x, u.y, u.z);
       return;
@@ -4459,6 +4478,18 @@ void Server::handleContainerSetSlot(player::Player& p, std::string_view buffer) 
 
   // Creative window 0x79 is server→client only content list; ignore client writes
   if (d.window_id == protocol::WINDOW_CREATIVE) {
+    return;
+  }
+
+  // Brewing stand window: write slots into the brewing tile
+  if (p.open_window_id != 0 && d.window_id == p.open_window_id &&
+      p.open_container_type == protocol::CONTAINER_TYPE_BREWING_STAND) {
+    auto* inv = p.level ? p.level->getBrewing(p.open_chest_x, p.open_chest_y, p.open_chest_z) : nullptr;
+    if (inv && d.slot >= 0 && d.slot < 5) {
+      inv->slots[static_cast<std::size_t>(d.slot)] = item::sanitizeSlot(d.item);
+      inv->dirty = true;
+      players_->sendPacket(p, protocol::encodeContainerSetContent(p.open_window_id, inv->slots), true);
+    }
     return;
   }
 
@@ -5671,6 +5702,7 @@ void Server::runLoop() {
       tickPlayerSurvival();
       for (auto& [_, lvl] : levels_.all()) {
         lvl->tickScheduled();
+        lvl->tickBrewing();
         if (lvl->generator() == level::GeneratorType::NormalStub || lvl->generator() == level::GeneratorType::Flat)
           lvl->tickWeather(tick_rng_);
       }

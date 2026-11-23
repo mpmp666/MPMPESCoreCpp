@@ -126,6 +126,7 @@ inline constexpr std::uint8_t CONTAINER_TYPE_FURNACE = 2;
 // PE 0.14 InventoryType network typeId for hopper (5 slots)
 inline constexpr std::uint8_t CONTAINER_TYPE_ENCHANT = 4;
 inline constexpr std::uint8_t CONTAINER_TYPE_ANVIL = 5;
+inline constexpr std::uint8_t CONTAINER_TYPE_BREWING_STAND = 6;
 inline constexpr std::uint8_t CONTAINER_TYPE_HOPPER = 8;
 
 // CraftingData entry types
@@ -203,6 +204,7 @@ inline constexpr std::uint8_t BLOCK_FIRE = 51;
 inline constexpr std::uint8_t BLOCK_CHEST = 54;
 inline constexpr std::uint8_t BLOCK_DIAMOND_ORE = 56;
 inline constexpr std::uint8_t BLOCK_WORKBENCH = 58;
+inline constexpr std::uint8_t BLOCK_BREWING_STAND = 117;
 inline constexpr std::uint8_t BLOCK_ANVIL = 145;
 inline constexpr std::uint8_t BLOCK_ENCHANTING_TABLE = 116;
 inline constexpr std::uint8_t BLOCK_BOOKSHELF = 47;
