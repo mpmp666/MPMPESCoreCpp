@@ -30,6 +30,7 @@ enum class EntityKind {
   Skeleton,
   Creeper,
   Wolf,
+  PigZombie,
 };
 
 inline bool isMinecartKind(EntityKind k) {
@@ -55,6 +56,7 @@ inline std::int32_t networkType(EntityKind k) {
     case EntityKind::Skeleton: return 34;
     case EntityKind::Creeper: return 33;
     case EntityKind::Wolf: return 14;
+    case EntityKind::PigZombie: return 36;
   }
   return protocol::ENTITY_PIG;
 }
@@ -77,6 +79,7 @@ inline const char* kindName(EntityKind k) {
     case EntityKind::Skeleton: return "Skeleton";
     case EntityKind::Creeper: return "Creeper";
     case EntityKind::Wolf: return "Wolf";
+    case EntityKind::PigZombie: return "PigZombie";
   }
   return "Mob";
 }
@@ -180,7 +183,7 @@ public:
     e.y = y;
     e.z = z;
     e.pitch = 0; // keep upright; non-zero pitch can look "upside down" on some models
-    e.hostile = (kind == EntityKind::Zombie || kind == EntityKind::Skeleton || kind == EntityKind::Creeper);
+    e.hostile = (kind == EntityKind::Zombie || kind == EntityKind::Skeleton || kind == EntityKind::Creeper || kind == EntityKind::PigZombie);
     e.health = e.hostile ? 20.f : 10.f;
     e.speed = e.hostile ? 0.15f : 0.10f;
     e.wander_ticks = 20 + (static_cast<int>(e.eid) % 40);

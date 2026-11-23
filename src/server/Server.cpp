@@ -2655,6 +2655,7 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     else if (a.find("cow") != std::string::npos) kind = entity::EntityKind::Cow;
     else if (a.find("sheep") != std::string::npos) kind = entity::EntityKind::Sheep;
     else if (a.find("wolf") != std::string::npos) kind = entity::EntityKind::Wolf;
+    else if (a.find("pigzombie") != std::string::npos || a.find("zombiepig") != std::string::npos) kind = entity::EntityKind::PigZombie;
     else if (a.find("skeleton") != std::string::npos) kind = entity::EntityKind::Skeleton;
     else if (a.find("creeper") != std::string::npos) kind = entity::EntityKind::Creeper;
     else if (a.find("zombie") != std::string::npos) kind = entity::EntityKind::Zombie;
