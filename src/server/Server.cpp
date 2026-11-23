@@ -2620,6 +2620,8 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
     if (a.find("chicken") != std::string::npos) kind = entity::EntityKind::Chicken;
     else if (a.find("cow") != std::string::npos) kind = entity::EntityKind::Cow;
     else if (a.find("sheep") != std::string::npos) kind = entity::EntityKind::Sheep;
+    else if (a.find("skeleton") != std::string::npos) kind = entity::EntityKind::Skeleton;
+    else if (a.find("creeper") != std::string::npos) kind = entity::EntityKind::Creeper;
     else if (a.find("zombie") != std::string::npos) kind = entity::EntityKind::Zombie;
     else if (a.find("pig") != std::string::npos || a.empty()) kind = entity::EntityKind::Pig;
     auto& e = entities_.spawn(kind, player->level, player->x + 1.5f, player->y, player->z + 1.5f);
@@ -3482,6 +3484,86 @@ void Server::dispatchCommand(std::string_view source_name, PermLevel level, std:
   (void)args;
 }
 
+void Server::explodeAt(level::Level* lvl, float x, float y, float z, float radius, bool break_blocks) {
+  if (!lvl) return;
+  // damage nearby players (scaled by distance)
+  if (players_) {
+    for (auto& [_, pl] : players_->all()) {
+      if (!pl.spawned || pl.level != lvl || pl.gamemode == 1) continue;
+      float dx = pl.x - x, dy = pl.y - y, dz = pl.z - z;
+      float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > radius * 2.f) continue;
+      float dmg = std::max(0.f, (radius * 2.f - dist) * 2.f);
+      if (dmg > 0.f) damagePlayer(pl, dmg, "explosion");
+      if (dist > 0.01f) knockbackPlayer(pl, x, z, 0.5f);
+    }
+  }
+  // destroy blocks in a sphere (not bedrock/obsidian)
+  if (break_blocks) {
+    const int r = static_cast<int>(std::ceil(radius));
+    const int bx = static_cast<int>(std::floor(x));
+    const int by = static_cast<int>(std::floor(y));
+    const int bz = static_cast<int>(std::floor(z));
+    for (int dx = -r; dx <= r; ++dx)
+      for (int dy = -r; dy <= r; ++dy)
+        for (int dz = -r; dz <= r; ++dz) {
+          if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
+          int wx = bx + dx, wy = by + dy, wz = bz + dz;
+          if (wy < 1 || wy > 126) continue;
+          auto bid = lvl->getBlockId(wx, wy, wz);
+          if (bid == 0 || bid == 7 || bid == 49) continue; // air/bedrock/obsidian survive
+          lvl->setBlock(wx, wy, wz, 0, 0);
+          broadcastBlockUpdate(lvl, wx, wy, wz, 0, 0);
+        }
+  }
+  // explosion particle + sound event (LevelEvent EXPLOSION)
+  if (players_) players_->broadcastNear(x, y, z, 64.f,
+      protocol::encodeLevelEvent(3501, x, y, z, 0) /* EXPLOSION particle */, lvl, nullptr);
+}
+
+void Server::fireBowIfDrawn(player::Player& p) {
+  if (p.bow_draw_start_ < 0) return;
+  const int held_ticks = ticks_ - p.bow_draw_start_;
+  p.bow_draw_start_ = -1;
+  if (!p.level) return;
+  auto held = p.heldItem();
+  if (held.id != item::ids::BOW) return;
+  // require an arrow in survival
+  if (p.gamemode != 1) {
+    bool has_arrow = false;
+    for (const auto& s : p.inventory)
+      if (s.id == item::ids::ARROW) { has_arrow = true; break; }
+    if (!has_arrow) return;
+  }
+  // PHP Bow::drawPower(ticks) * 2
+  float pw = static_cast<float>(std::max(0, held_ticks)) / 20.0f;
+  float power = std::min(1.0f, (pw * pw + 2 * pw) / 3.0f);
+  float f = power * 2.0f;
+  if (f < 0.1f || held_ticks < 5) return;
+  const float yaw = p.yaw * 3.14159265f / 180.0f, pitch = p.pitch * 3.14159265f / 180.0f;
+  float mx = -std::sin(yaw) * std::cos(pitch);
+  float my = -std::sin(pitch);
+  float mz = std::cos(yaw) * std::cos(pitch);
+  // spawn at eye height
+  auto& e = entities_.spawnProjectile(entity::EntityKind::Arrow, p.level, p.x,
+                                      p.y + 1.62f, p.z, mx, my, mz, p.entity_id);
+  e.motion_x = mx * f;
+  e.motion_y = my * f;
+  e.motion_z = mz * f;
+  // broadcast spawn
+  for (auto& [_, pl] : players_->all()) {
+    if (!pl.spawned || pl.level != p.level) continue;
+    players_->sendPacket(pl, protocol::encodeAddEntity(e.eid, 80, e.x, e.y, e.z, p.yaw, 0, e.motion_x, e.motion_y, e.motion_z, ""), false);
+    pl.known_entities.insert(e.eid);
+  }
+  // consume arrow in survival
+  if (p.gamemode != 1) {
+    for (auto& s : p.inventory)
+      if (s.id == item::ids::ARROW) { if (--s.count == 0) s = item::ItemStack::air(); break; }
+    players_->sendInventory(p);
+  }
+}
+
 void Server::handlePlayerInput(player::Player& p, std::string_view buffer) {
   auto in = protocol::decodePlayerInput(buffer);
   if (!in.ok || !p.spawned) return;
@@ -3614,6 +3696,8 @@ void Server::handlePlayerAction(player::Player& p, std::string_view buffer) {
     // Q key alternate path — throw held item (single)
     auto held = p.heldItem();
     if (!held.empty()) playerThrowHeld(p, held, false);
+  } else if (a.action == protocol::ACTION_RELEASE_ITEM) {
+    fireBowIfDrawn(p);
   } else if (a.action == protocol::ACTION_RESPAWN) {
     if (p.death_ticks_ >= 0 || p.health <= 0) respawnPlayer(p);
   } else if (a.action == protocol::ACTION_JUMP || a.action == protocol::ACTION_START_SNEAK) {
@@ -3988,6 +4072,8 @@ void Server::handleUseItem(player::Player& p, std::string_view buffer) {
   item::ItemStack held = u.item.empty() ? p.heldItem() : u.item;
   // face 0xff = air click / eat etc
   if (u.face == 0xff) {
+    // bow draw start (force accumulates until release)
+    if (held.id == item::ids::BOW) p.bow_draw_start_ = ticks_;
     // Eating (PHP PlayerItemConsumeEvent path): only survival, food < 20
     static const std::unordered_map<int, std::pair<float, float>> FOODS = {
         {260, {4, 2.4f}}, {393, {5, 7.2f}}, {457, {1, 1.2f}}, {297, {5, 6.f}},
@@ -5025,6 +5111,22 @@ void Server::start() {
   });
   autosave_ticks_left_ = cfg_.autosave_seconds > 0 ? cfg_.autosave_seconds * 20 : 0;
 
+  entities_.setProjectileHit([this](const entity::Entity& proj, float damage) {
+    // arrow/snowball hit: nearest survival player within ~1.2 blocks
+    if (!players_) return false;
+    player::Player* best = nullptr;
+    float bestd = 1.44f;
+    for (auto& [_, pl] : players_->all()) {
+      if (!pl.spawned || pl.gamemode == 1 || pl.level != proj.level) continue;
+      float dx = pl.x - proj.x, dy = pl.y - proj.y, dz = pl.z - proj.z;
+      float d = dx * dx + dy * dy + dz * dz;
+      if (d < bestd) { bestd = d; best = &pl; }
+    }
+    if (!best) return false;
+    if (damage > 0.f) damagePlayer(*best, 2.f, "arrow");
+    return true;
+  });
+
   entities_.setNearestPlayerProvider(
       [this](level::Level* lvl, float x, float y, float z, float range) {
         float best = range * range;
@@ -5042,13 +5144,37 @@ void Server::start() {
         return std::make_tuple(bp->x, bp->y, bp->z, bp->entity_id, static_cast<int>(bp->heldItem().id), true);
       });
   entities_.setMobAttackHandler([this](std::int64_t peid, float dmg, entity::Entity& mob) {
+    player::Player* target = nullptr;
     for (auto& [_, pl] : players_->all()) {
-      if (pl.spawned && pl.entity_id == peid) {
-        if (damagePlayer(pl, dmg, "mob")) {
-          knockbackPlayer(pl, mob.x, mob.z, 0.35f);
-        }
-        break;
+      if (pl.spawned && pl.entity_id == peid) { target = &pl; break; }
+    }
+    if (!target) return;
+    if (dmg == 0.f && mob.kind == entity::EntityKind::Skeleton) {
+
+      // skeleton shot an arrow at the target
+      float dx = target->x - mob.x, dy = (target->y + 1.0f) - (mob.y + 1.5f), dz = target->z - mob.z;
+      float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > 0.01f) { dx /= dist; dy /= dist; dz /= dist; }
+      const float power = 1.6f;
+      auto& arrow = entities_.spawnProjectile(entity::EntityKind::Arrow, mob.level,
+                                              mob.x, mob.y + 1.5f, mob.z, dx * power, dy * power + 0.1f,
+                                              dz * power, mob.eid);
+      for (auto& [_, pl] : players_->all()) {
+        if (!pl.spawned || pl.level != mob.level) continue;
+        players_->sendPacket(pl, protocol::encodeAddEntity(arrow.eid, 80, arrow.x, arrow.y, arrow.z, 0, 0,
+                                                           arrow.motion_x, arrow.motion_y, arrow.motion_z, ""), false);
+        pl.known_entities.insert(arrow.eid);
       }
+      return;
+    }
+    if (dmg < 0.f && mob.kind == entity::EntityKind::Creeper) {
+
+      // creeper explode: AoE damage by distance + block destruction sphere
+      explodeAt(mob.level, mob.x, mob.y, mob.z, 3.f, true);
+      return;
+    }
+    if (damagePlayer(*target, dmg, "mob")) {
+      knockbackPlayer(*target, mob.x, mob.z, 0.35f);
     }
   });
 

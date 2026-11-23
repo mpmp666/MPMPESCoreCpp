@@ -25,6 +25,10 @@ enum class EntityKind {
   MinecartTNT,
   MinecartChest,
   FallingBlock,
+  Arrow,
+  Snowball,
+  Skeleton,
+  Creeper,
 };
 
 inline bool isMinecartKind(EntityKind k) {
@@ -45,6 +49,10 @@ inline std::int32_t networkType(EntityKind k) {
     case EntityKind::MinecartTNT: return protocol::ENTITY_MINECART_TNT;
     case EntityKind::MinecartChest: return protocol::ENTITY_MINECART_CHEST;
     case EntityKind::FallingBlock: return 66; // FallingSand
+    case EntityKind::Arrow: return 80;
+    case EntityKind::Snowball: return 81;
+    case EntityKind::Skeleton: return 34;
+    case EntityKind::Creeper: return 33;
   }
   return protocol::ENTITY_PIG;
 }
@@ -62,6 +70,10 @@ inline const char* kindName(EntityKind k) {
     case EntityKind::MinecartTNT: return "MinecartTNT";
     case EntityKind::MinecartChest: return "MinecartChest";
     case EntityKind::FallingBlock: return "FallingSand";
+    case EntityKind::Arrow: return "Arrow";
+    case EntityKind::Snowball: return "Snowball";
+    case EntityKind::Skeleton: return "Skeleton";
+    case EntityKind::Creeper: return "Creeper";
   }
   return "Mob";
 }
@@ -137,6 +149,12 @@ struct Entity {
   std::uint8_t fall_block_id_ = 0;
   std::uint8_t fall_block_meta_ = 0;
   bool fall_landed_ = false;
+  // projectile (arrow/snowball)
+  std::int64_t shooter_eid_ = -1;
+  int proj_life_ = 0;
+  // creeper swell / skeleton shoot cooldown
+  int swell_ = 0;
+  bool exploding_ = false;
 };
 
 class EntityManager {
@@ -152,7 +170,7 @@ public:
     e.y = y;
     e.z = z;
     e.pitch = 0; // keep upright; non-zero pitch can look "upside down" on some models
-    e.hostile = (kind == EntityKind::Zombie);
+    e.hostile = (kind == EntityKind::Zombie || kind == EntityKind::Skeleton || kind == EntityKind::Creeper);
     e.health = e.hostile ? 20.f : 10.f;
     e.speed = e.hostile ? 0.15f : 0.10f;
     e.wander_ticks = 20 + (static_cast<int>(e.eid) % 40);
@@ -202,6 +220,20 @@ public:
     e.x = x; e.y = y; e.z = z;
     e.fall_block_id_ = id;
     e.fall_block_meta_ = meta;
+    e.on_ground = false;
+    entities_[e.eid] = e;
+    return entities_[e.eid];
+  }
+
+  Entity& spawnProjectile(EntityKind kind, level::Level* level, float x, float y, float z,
+                          float mx, float my, float mz, std::int64_t shooter) {
+    Entity e;
+    e.eid = nextEid();
+    e.kind = kind;
+    e.level = level;
+    e.x = x; e.y = y; e.z = z;
+    e.motion_x = mx; e.motion_y = my; e.motion_z = mz;
+    e.shooter_eid_ = shooter;
     e.on_ground = false;
     entities_[e.eid] = e;
     return entities_[e.eid];
@@ -505,6 +537,44 @@ public:
         continue;
       }
 
+      // Projectile (arrow/snowball): gravity + drag, despawn on block hit, damage on entity hit
+      if (e.kind == EntityKind::Arrow || e.kind == EntityKind::Snowball) {
+        ++e.proj_life_;
+        if (e.proj_life_ > 1200) { e.closed = true; to_erase.push_back(id); continue; }
+        e.motion_y -= (e.kind == EntityKind::Arrow ? 0.05f : 0.03f) * dt_ticks;
+        float nx = e.x + e.motion_x * dt_ticks;
+        float ny = e.y + e.motion_y * dt_ticks;
+        float nz = e.z + e.motion_z * dt_ticks;
+        const int bx = static_cast<int>(std::floor(nx));
+        const int by = static_cast<int>(std::floor(ny));
+        const int bz = static_cast<int>(std::floor(nz));
+        if (by < 0 || by >= 128) { e.closed = true; to_erase.push_back(id); continue; }
+        auto bid = e.level->getBlockId(bx, by, bz);
+        // block collision (solid blocks stop the projectile)
+        static const auto isSolid = [](std::uint8_t b) {
+          return b != 0 && b != 6 && b != 8 && b != 9 && b != 10 && b != 11 && b != 31 && b != 32 &&
+                 b != 37 && b != 38 && b != 39 && b != 40 && b != 50 && b != 51 && b != 55 &&
+                 b != 59 && b != 83 && b != 78 && b != 111 && b != 63 && b != 68 && b != 65 &&
+                 b != 66 && b != 27 && b != 28 && b != 175 && b != 104 && b != 105 && b != 115 &&
+                 b != 141 && b != 142 && b != 244 && b != 245;
+        };
+        bool hitBlock = isSolid(bid);
+        // entity hit (players via hook)
+        bool hitEntity = false;
+        if (!hitBlock && projectile_hit_) {
+          hitEntity = projectile_hit_(e, e.kind == EntityKind::Arrow ? 1.f : 0.f);
+        }
+        if (hitBlock || hitEntity) {
+          e.closed = true;
+          to_erase.push_back(id);
+          continue;
+        }
+        e.motion_x *= 0.99f; e.motion_y *= 0.99f; e.motion_z *= 0.99f;
+        e.x = nx; e.y = ny; e.z = nz;
+        moved.push_back(&e);
+        continue;
+      }
+
       // FallingSand: gravity falls until ground, then re-materialize as the block
       if (e.kind == EntityKind::FallingBlock) {
         e.motion_y -= 0.04f * dt_ticks; // gravity
@@ -562,7 +632,6 @@ public:
           return nearest_player_(e.level, e.x, e.y, e.z, range);
         };
         if (e.hostile) {
-          // hostile (zombie): chase nearest survival player in 16 blocks
           auto [tx, ty, tz, teid, held_id, okv] = nearest(16.f);
           if (okv) {
             e.ai_target_eid_ = teid;
@@ -570,20 +639,58 @@ public:
             float dist = std::sqrt(ddx * ddx + ddz * ddz);
             e.target_yaw = -std::atan2(ddx, ddz) * 180.f / 3.14159265f;
             e.yaw = e.target_yaw;
-            if (dist > 1.2f) {
-              e.motion_x = ddx / std::max(dist, 0.01f) * e.speed;
-              e.motion_z = ddz / std::max(dist, 0.01f) * e.speed;
-              ai_driving = true;
+            if (e.kind == EntityKind::Skeleton) {
+              // skeleton: hold ~8 blocks, shoot arrows (mob_attack_ spawns the projectile server-side)
+              if (dist > 9.f) {
+                e.motion_x = ddx / std::max(dist, 0.01f) * e.speed;
+                e.motion_z = ddz / std::max(dist, 0.01f) * e.speed;
+                ai_driving = true;
+              } else if (dist < 4.f) {
+                e.motion_x = -ddx / std::max(dist, 0.01f) * e.speed;
+                e.motion_z = -ddz / std::max(dist, 0.01f) * e.speed;
+                ai_driving = true;
+              } else {
+                e.motion_x = 0;
+                e.motion_z = 0;
+              }
+              if (dist < 12.f && e.attack_cooldown_ <= 0 && mob_attack_) {
+                e.attack_cooldown_ = 40; // 2s between shots
+                mob_attack_(teid, 0.f, e); // server spawns an arrow at the target
+              }
+            } else if (e.kind == EntityKind::Creeper) {
+              // creeper: chase; within 3 blocks swell for 30 ticks then explode
+              if (e.swell_ > 0) {
+                e.motion_x = 0;
+                e.motion_z = 0;
+                if (--e.swell_ == 0 && mob_attack_) mob_attack_(teid, -1.f, e); // -1 = explode
+                e.closed = e.swell_ <= 0;
+              } else if (dist > 1.6f) {
+                e.motion_x = ddx / std::max(dist, 0.01f) * e.speed;
+                e.motion_z = ddz / std::max(dist, 0.01f) * e.speed;
+                ai_driving = true;
+              } else {
+                e.motion_x = 0;
+                e.motion_z = 0;
+                e.swell_ = 30;
+              }
             } else {
-              e.motion_x = 0;
-              e.motion_z = 0;
-              if (e.attack_cooldown_ <= 0 && mob_attack_) {
-                e.attack_cooldown_ = 20; // 1s
-                mob_attack_(teid, 3.f, e);
+              // zombie melee
+              if (dist > 1.2f) {
+                e.motion_x = ddx / std::max(dist, 0.01f) * e.speed;
+                e.motion_z = ddz / std::max(dist, 0.01f) * e.speed;
+                ai_driving = true;
+              } else {
+                e.motion_x = 0;
+                e.motion_z = 0;
+                if (e.attack_cooldown_ <= 0 && mob_attack_) {
+                  e.attack_cooldown_ = 20;
+                  mob_attack_(teid, 3.f, e);
+                }
               }
             }
           } else {
             e.ai_target_eid_ = -1;
+            if (e.kind == EntityKind::Creeper && e.swell_ > 0) e.swell_ = 0; // defuse
           }
         } else if (e.hurt_flee_ticks_ > 0) {
           // animal flees from the attacker position
@@ -688,6 +795,8 @@ public:
   // Mob melee hit on a player: (player_runtime_eid, damage, mob&)
   using MobAttackFn = std::function<void(std::int64_t, float, Entity&)>;
   void setMobAttackHandler(MobAttackFn f) { mob_attack_ = std::move(f); }
+  using ProjectileHitFn = std::function<bool(const Entity& proj, float damage)>;
+  void setProjectileHit(ProjectileHitFn f) { projectile_hit_ = std::move(f); }
 
   std::unordered_map<std::int64_t, Entity>& all() { return entities_; }
   const std::unordered_map<std::int64_t, Entity>& all() const { return entities_; }
@@ -717,6 +826,7 @@ private:
   std::int64_t next_eid_ = 1000; // leave room below for players
   NearestPlayerFn nearest_player_;
   MobAttackFn mob_attack_;
+  ProjectileHitFn projectile_hit_;
   std::unordered_map<std::int64_t, Entity> entities_;
   std::mt19937 rng_{std::random_device{}()};
 };

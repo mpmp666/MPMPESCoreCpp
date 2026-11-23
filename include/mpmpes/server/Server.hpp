@@ -62,6 +62,8 @@ private:
   void handleText(player::Player& p, std::string_view buffer);
   void handleMove(player::Player& p, std::string_view buffer);
   void handlePlayerInput(player::Player& p, std::string_view buffer);
+  void fireBowIfDrawn(player::Player& p);
+  void explodeAt(level::Level* lvl, float x, float y, float z, float radius, bool break_blocks);
   void handleChunkRadius(player::Player& p, std::string_view buffer);
   void handlePlayerAction(player::Player& p, std::string_view buffer);
   void handleRemoveBlock(player::Player& p, std::string_view buffer);

@@ -105,7 +105,8 @@ struct Player {
   bool on_ground_ = true;
   int fire_ticks_ = 0;      // standing in fire/lava
   int hurt_cooldown_ = 0;   // i-frames after damage
-  int death_ticks_ = -1;    // >=0 while dead awaiting respawn
+  int death_ticks_ = -1;
+  int bow_draw_start_ = -1; // tick when bow draw began (for release force)    // >=0 while dead awaiting respawn
 
   // Client sky/atmosphere dim override (any wire value). -1 = follow level.
   // Used by visual-dim experiments without world switch; not remapped/whitelist-filtered.
