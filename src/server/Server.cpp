@@ -11,6 +11,7 @@
 #include "mpmpes/entity/EntityNbt.hpp"
 #include "mpmpes/entity/Effects.hpp"
 #include "mpmpes/item/Enchantments.hpp"
+#include "mpmpes/level/structure/Repository.hpp"
 #include "mpmpes/network/QueryRcon.hpp"
 #include "mpmpes/util/Logger.hpp"
 
@@ -5037,6 +5038,9 @@ void Server::start() {
     });
     util::Logger::instance().info("Query enabled on port ", cfg_.port);
   }
+
+  // Structure repository (end city templates etc.) — resources/structures next to the data dir
+  level::structure::StructureRepository::init("resources/structures");
 
   // RCON (SRCDS) on TCP
   if (cfg_.enable_rcon && !cfg_.rcon_password.empty()) {

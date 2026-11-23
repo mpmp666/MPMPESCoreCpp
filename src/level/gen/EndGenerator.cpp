@@ -2,6 +2,7 @@
 #include "mpmpes/level/gen/EndGenerator.hpp"
 #include "mpmpes/level/Chunk.hpp"
 #include "mpmpes/level/gen/EndFeatures.hpp"
+#include "mpmpes/level/structure/StructurePlacer.hpp"
 
 #include <algorithm>
 
@@ -280,15 +281,25 @@ std::string EndTerrainNoise::biome(int x, int z) {
   return h < -0.21875 ? "small_end_islands" : "end_barrens";
 }
 
+void EndTerrainNoise::chunkNodesCached(int cx, int cz, const double*& out) {
+  if (cx != cache_cx_ || cz != cache_cz_) {
+    chunkNodes(cx, cz, cache_nodes_.data());
+    cache_cx_ = cx;
+    cache_cz_ = cz;
+  }
+  out = cache_nodes_.data();
+}
+
 bool EndTerrainNoise::solid(int x, int y, int z) {
   if (y < 0 || y >= 128) return false;
   int cx = x >> 4, cz = z >> 4;
-  double nodes[297];
-  chunkNodes(cx, cz, nodes);
+  const double* nodes;
+  chunkNodesCached(cx, cz, nodes);
   int lx = x & 15, lz = z & 15;
   int gx = lx >> 3, gz = lz >> 3, gy = y >> 2;
   double fy = (y & 3) / 4.0, fx = (lx & 7) / 8.0, fz = (lz & 7) / 8.0;
   auto n = [&](int a, int b, int g) { return nodes[(a * 3 + b) * 33 + g]; };
+
   double n00 = n(gx, gz, gy), n10 = n(gx + 1, gz, gy), n01 = n(gx, gz + 1, gy), n11 = n(gx + 1, gz + 1, gy);
   double xz00 = n00 + fy * (n(gx, gz, gy + 1) - n00);
   double xz10 = n10 + fy * (n(gx + 1, gz, gy + 1) - n10);
@@ -334,6 +345,19 @@ void generateEndTerrainChunk(level::Chunk& chunk, std::int64_t seed) {
   // End features (spikes, podium, platform, chorus, small islands)
   EndFeatures features(seed, terrain);
   features.populate(chunk);
+  // End cities (26.2): PHP endForChunk reach = ceil(272/16)+1 = 18 chunks
+  {
+    const int reach = 18, spacing = 20;
+    auto floordiv = [](int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); };
+    const int minRX = floordiv(chunk.x() - reach, spacing) - 1;
+    const int maxRX = floordiv(chunk.x() + reach, spacing);
+    const int minRZ = floordiv(chunk.z() - reach, spacing) - 1;
+    const int maxRZ = floordiv(chunk.z() + reach, spacing);
+    auto surfaceHeight = [&](int x, int z) { return terrain.surfaceHeight(x, z); };
+    for (int rx = minRX; rx <= maxRX; ++rx)
+      for (int rz = minRZ; rz <= maxRZ; ++rz)
+        structure::placeCityIntoChunk(chunk, seed, rx, rz, terrain, surfaceHeight);
+  }
   chunk.setPopulated(true);
 }
 

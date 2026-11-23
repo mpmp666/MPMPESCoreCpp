@@ -38,6 +38,10 @@ add_executable(mpmpes
   src/level/gen/EndGenerator.cpp
   src/level/gen/EndFeatures.cpp
   src/util/Sha256.cpp
+  src/util/Json.cpp
+  src/level/structure/StructurePlacer.cpp
+  src/level/structure/EndCityLayout.cpp
+  src/level/structure/Repository.cpp
   src/level/RandomTick.cpp
   src/level/FluidTick.cpp
   src/player/Player.cpp

@@ -3,6 +3,7 @@
 // ImprovedNoise, SimplexNoise, BlendedNoise, EndIslands, EndChunkGrid.
 
 #include <cmath>
+#include <array>
 #include <cstdint>
 #include <memory>
 
@@ -86,6 +87,14 @@ public:
   double islandDensity(int x, int z) { return islands_.compute(x, z); }
   // interpolated density > 0 (EndChunkGrid::solid)
   bool solid(int x, int y, int z);
+  void chunkNodesCached(int cx, int cz, const double*& out);
+  // topmost solid y at (x,z); -1 when none
+  int surfaceHeight(int x, int z) {
+    // PHP EndChunkGrid::surfaceHeight returns topSolid + 1 (first air block)
+    for (int y = 127; y >= 0; --y)
+      if (solid(x, y, z)) return y + 1;
+    return 0;
+  }
   double islandHeight(int x, int z) { return islands_.height(x, z); }
   // lattice nodes for a chunk: gx,gz in 0..2, gy 0..32 -> 297 values
   void chunkNodes(int cx, int cz, double out[297]);
@@ -97,6 +106,8 @@ public:
 private:
   std::unique_ptr<BlendedNoise> base_;
   EndIslands islands_;
+  mutable int cache_cx_ = 0x7fffffff, cache_cz_ = 0x7fffffff;
+  mutable std::array<double, 297> cache_nodes_{};
 };
 
 void generateEndTerrainChunk(level::Chunk& chunk, std::int64_t seed);
